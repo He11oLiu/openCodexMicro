@@ -1,0 +1,19 @@
+{
+  "name": "open-codex-micro",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Turn a Ulanzi D200 into openCodexMicro",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "python3 -m unittest discover -s test -p '*_test.py'",
+    "check:node": "node --check scripts/install.mjs && node --check scripts/uninstall.mjs",
+    "check": "npm run test && npm run check:node",
+    "setup": "node scripts/install.mjs",
+    "install:native": "node scripts/install.mjs",
+    "uninstall": "node scripts/uninstall.mjs"
+  }
+}
