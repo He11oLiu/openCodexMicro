@@ -5,11 +5,13 @@ complete Codex Desktop companion.**
 
 [中文说明](README_zh.md)
 
-![openCodexMicro on an Ulanzi D200](docs/images/codex-keyboard-hero.png)
+![Meet OpenCodexMicro](docs/images/opencodexmicro-promo-comic-v2.png)
 
 openCodexMicro gives Codex Desktop a dedicated hardware surface. See what your
 latest tasks are doing, jump between them with one press, and keep the actions
 you use most under your fingertips.
+
+![openCodexMicro on an Ulanzi D200](docs/images/codex-keyboard-hero.png)
 
 ## What it does
 
