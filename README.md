@@ -17,12 +17,12 @@ you use most under your fingertips.
 
 | Feature | Behavior |
 | --- | --- |
-| Five live task keys | Follow Codex's Most Recent order and show idle, thinking, complete, input/approval, or error |
+| Five live task keys | Merge local and Codex-managed SSH tasks in Most Recent order, with idle, thinking, complete, input/approval, or error |
 | Instant task switching | Opens the exact task shown on the physical key |
 | Codex controls | Fast, Pin, New, Fork, Steer, Mic, and Submit |
 | Usage at a glance | Shows the remaining weekly allowance and refreshes it automatically |
 | Clock and Focus | Keeps the D200 firmware clock and uses it as a Codex focus key |
-| Native integration | Uses Codex app-server, rollout events, and `codex://` deep links—no browser debugging port |
+| Event-driven integration | Uses Codex app-server, rollout events, persistent SSH, plus an optional loopback-only official-Micro bridge |
 | Responsive display | Sends only changed keys and keeps input ahead of display transfers |
 | Hot-plug recovery | Reconnects to the D200 and restores its last known display |
 
@@ -45,16 +45,31 @@ Requirements:
 Clone the repository, then run:
 
 ```bash
+npm install
 npm run setup
 ```
 
 The installer creates an isolated Python environment, installs `hidapi` and
-Pillow, registers a user LaunchAgent, and starts openCodexMicro. Existing
-CodexKeyboard installations are migrated automatically; a legacy custom theme
-is copied before the old runtime is removed.
+Pillow, registers the D200 and bridge sidecar LaunchAgents, and installs
+`Codex Bridge.app` in `~/Applications`. Existing CodexKeyboard installations are migrated
+automatically; a legacy custom theme is copied before the old runtime is
+removed.
 
-The first simulated shortcut may trigger a macOS Accessibility permission
-prompt. Allow the installed Python process to control `System Events`.
+For fast direct switching, quit Codex and double-click **Codex Bridge.app**.
+It starts the real Codex executable with a loopback-only CDP endpoint. Task
+keys then use Codex's own Micro event bus, including its saved SSH
+host/project routing. The official Micro page reports the emulated device as
+connected.
+
+If Codex was launched normally, the first task press explains that Bridge mode
+is inactive. Local tasks use `codex://threads/<id>`; SSH tasks use Codex's
+native Dock **Recent** callback by exact title. The Dock menu can appear
+briefly. This fallback never moves the pointer or depends on screen
+coordinates, but it requires macOS Accessibility permission.
+
+The installer also adds
+`realtimeVoice.toggleMicrophoneMute → Command+Alt+M` when that Codex shortcut
+is absent; an existing user override is preserved.
 
 See [Setup and operations](docs/setup-and-operations.md) for permissions,
 logs, diagnostics, updates, migration, and uninstall instructions.

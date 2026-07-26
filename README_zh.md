@@ -12,12 +12,12 @@ openCodexMicro 为 Codex Desktop 提供一块专用硬件控制面板：直接�
 
 | 功能 | 行为 |
 | --- | --- |
-| 五个实时任务键 | 跟随 Codex 的 Most Recent 顺序，显示空闲、运行、完成、等待输入/审批或错误 |
+| 五个实时任务键 | 合并本机与 Codex 管理的 SSH 任务，按 Most Recent 排序并显示空闲、运行、完成、等待输入/审批或错误 |
 | 一键切换任务 | 打开实体按键当前显示的准确任务 |
 | Codex 常用控制 | Fast、Pin、New、Fork、Steer、Mic 和 Submit |
 | Usage 显示 | 展示剩余周额度并自动刷新 |
 | 时钟与 Focus | 保留 D200 固件时钟，按下可聚焦 Codex |
-| 原生集成 | 使用 Codex app-server、rollout 事件和 `codex://` deep link，不开启浏览器调试端口 |
+| 事件驱动集成 | 使用 Codex app-server、rollout 事件、持久 SSH，以及可选的本机官方 Micro bridge |
 | 响应式显示 | 只传输发生变化的键，并始终优先处理实体输入 |
 | 热插拔恢复 | D200 重新连接后恢复最后一次成功画面 |
 
@@ -40,12 +40,26 @@ openCodexMicro 为 Codex Desktop 提供一块专用硬件控制面板：直接�
 克隆仓库后运行：
 
 ```bash
+npm install
 npm run setup
 ```
 
-安装器会创建独立 Python 环境、安装 `hidapi` 和 Pillow、注册用户级 LaunchAgent，并启动 openCodexMicro。已有 CodexKeyboard 安装会自动迁移；旧的自定义主题会先复制，再清理旧运行目录。
+安装器会创建独立 Python 环境、安装 `hidapi` 和 Pillow、注册 D200 与 bridge
+sidecar 两个用户级 LaunchAgent，并把 **Codex Bridge.app** 安装到
+`~/Applications`。已有 CodexKeyboard 安装会自动迁移；旧的自定义主题会先复制，再清理旧运行目录。
 
-第一次模拟快捷键时，macOS 可能请求辅助功能权限。请允许安装后的 Python 进程控制 `System Events`。
+要使用最快的直接跳转，先完全退出 Codex，再双击
+`~/Applications/Codex Bridge.app`。它会给真实 Codex 可执行文件增加仅绑定
+回环地址的 CDP 参数。任务键随后复用 Codex 官方 Micro event bus，包括 Codex
+保存的 SSH host/project 路由；官方 Micro 设置页会显示模拟设备已连接。
+
+如果 Codex 是普通方式启动，第一次按任务键会说明当前没有启用 Bridge。
+本机任务走 `codex://threads/<id>`，SSH 任务按精确标题调用 Codex Dock
+右键菜单里的原生 **Recent** 回调。Dock 菜单可能短暂出现；该回退不移动鼠标、
+不依赖屏幕坐标，但需要 macOS 辅助功能权限。
+
+安装器还会在缺失时补充
+`realtimeVoice.toggleMicrophoneMute → Command+Alt+M`；已有用户自定义不会被覆盖。
 
 权限、日志、诊断、更新、迁移和卸载方法见 [安装与运行](docs/setup-and-operations.md)。
 

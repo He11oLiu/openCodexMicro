@@ -28,6 +28,15 @@
 - fork rollout 可能瞬间复制几十 MB 历史。新会话从首行 `session_meta` 识别身份，只解析文件尾部的当前生命周期；禁止为了显示一个键从头解析完整 fork。
 - 只接收 `thread_source=user` 的本地 rollout；subagent 不能占据用户的 Most Recent 键位。
 - 五个任务对齐 Codex Micro 默认 Most Recent 顺序。新建或重新活动的用户 rollout 本地直接晋升，`thread/list` 只负责补齐和对账，不能成为显示热路径。
+- Codex 管理的每台活动 SSH host 只维持一条长连接；远端 rollout 必须通过 inotify 增量推送，禁止定时 SSH 扫目录。
+- SSH 掉线保留最后 lifecycle，只设置 `hostOnline=false`；重连后 inventory 和 rollout 尾部重新对账，禁止把网络故障映射为任务 error。
+- Bridge 导航必须使用 D200 当前槽位的明确 thread ID，通过 Codex Micro
+  event bus 交给 Codex 自己解析 host/project assignment；禁止退回 pinned
+  task 会占位的 `Command+1…9`。
+- Bridge 端口只能绑定 `127.0.0.1`。sidecar 不得监听 LAN，也不得把 CDP
+  WebSocket 暴露给非本机来源。
+- 非 Bridge 模式必须明确说明当前回退。SSH 只允许使用 Dock **Recent** 的
+  精确唯一标题回调；标题缺失、重名或不在菜单中必须报错。禁止鼠标坐标点击。
 - inventory/recent 事件先写入 staged logical frame，经过短静默窗口只发布最终 revision；禁止首查和补查各自启动一次 HID 事务。
 - profile 传完不等于画面已经提交。像素摘要、五键 thread 映射和缓存必须在固件激活命令成功后原子切换。
 - 独立 app-server 不会自动订阅 Desktop 已加载线程。approval、input、error 等状态不能只依赖它的线程通知。

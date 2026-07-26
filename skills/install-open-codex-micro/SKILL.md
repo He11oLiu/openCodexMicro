@@ -45,6 +45,7 @@ and `standalone/d200.py` are not there, ask for the openCodexMicro checkout.
 7. Install with:
 
    ```bash
+   npm install
    npm run setup
    ```
 
@@ -84,4 +85,6 @@ and `standalone/d200.py` are not there, ask for the openCodexMicro checkout.
   theme and backs up invalid configuration.
 - Do not delete runtime data manually; use `npm run uninstall` only when the
   user explicitly asks to uninstall.
-- Never enable Chromium debugging or restore the removed bridge mode.
+- Keep normal Codex launch as the native fallback. Enable the loopback-only
+  bridge only through the installed `Codex Bridge.app`; never expose CDP on a
+  non-loopback interface.

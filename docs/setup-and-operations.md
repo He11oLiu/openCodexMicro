@@ -1,26 +1,36 @@
 # Setup and Operations
 
-openCodexMicro has one native integration path:
+openCodexMicro has one event-driven state pipeline and two automatically
+detected navigation modes:
 
 ```text
-Codex app-server + rollout events + codex:// deep links
+Codex app-server + local kqueue + persistent SSH/inotify
                          ↓
-                  openCodexMicro
+             unified local/SSH Most Recent
                          ↓
                    Ulanzi D200
 ```
 
-It does not open a Chromium debugging port or run a local HTTP service.
+| How Codex was launched | Task-key navigation |
+| --- | --- |
+| `Codex Bridge.app` | Official Codex Micro event bus through loopback CDP |
+| Normal Codex app | Local `codex://` links; SSH Dock **Recent** callback |
+
+No daemon setting selects the mode. The sidecar checks whether the current
+Codex process exposes the loopback bridge. Otherwise openCodexMicro
+automatically uses the normal fallback and explains that once on first use.
 
 ## Dependencies
 
 - macOS;
 - Codex Desktop;
 - Ulanzi D200 over USB;
-- Node.js 20 or newer for the installer;
-- Python 3.11 or newer with `venv`.
+- Node.js 20 or newer;
+- Python 3.11 or newer with `venv`;
+- Accessibility permission for action shortcuts and the normal-mode SSH Dock
+  Recent fallback.
 
-The installer creates an isolated runtime environment and installs:
+The installer creates an isolated runtime venv and installs:
 
 | Dependency | Purpose |
 | --- | --- |
@@ -36,14 +46,22 @@ The runtime venv is stored at:
 ## Install
 
 ```bash
+npm install
 npm run setup
 ```
 
-The installer validates Python before changing the active service, creates the
-runtime directory with private permissions, installs dependencies, and starts
-the LaunchAgent.
+The installer validates Python before changing active services, builds the
+bridge, creates the private runtime directory, and starts the D200 and bridge
+sidecar LaunchAgents. It also installs and ad-hoc signs:
 
-To install the LaunchAgent without starting the daemon:
+```text
+~/Applications/Codex Bridge.app
+```
+
+The installer adds `realtimeVoice.toggleMicrophoneMute → Command+Alt+M` only
+when that Codex command has no existing shortcut override.
+
+To install files without starting either LaunchAgent:
 
 ```bash
 npm run setup -- --no-start
@@ -51,49 +69,72 @@ npm run setup -- --no-start
 
 ### Migration from CodexKeyboard
 
-The installer stops and removes the old native and bridge LaunchAgents. If an
-old `icon-theme.json` exists, it is migrated to openCodexMicro and also kept as
-`icon-theme.legacy-backup.json`. The obsolete CodexKeyboard runtime directory
-is then removed.
+The installer stops and removes old native and bridge LaunchAgents. An old
+`icon-theme.json` is migrated to openCodexMicro and retained as
+`icon-theme.legacy-backup.json` before the obsolete runtime is removed.
+
+## Starting Codex
+
+For direct official-Micro navigation:
+
+1. Quit the currently running Codex app.
+2. Double-click `~/Applications/Codex Bridge.app`.
+
+The wrapper launches `/Applications/ChatGPT.app/Contents/MacOS/ChatGPT`
+directly with:
+
+```text
+--remote-debugging-address=127.0.0.1
+--remote-debugging-port=9222
+--remote-allow-origins=http://127.0.0.1:9222
+```
+
+It waits for `/json/version`. If the endpoint does not become available, the
+wrapper displays an error explaining that task keys will use normal fallback.
+Finder does not provide persistent per-app launch arguments; this wrapper is
+the supported double-click launcher.
+
+Opening the original Codex icon remains valid. In that case the first task
+press displays a one-time explanation, local tasks use deep links, and SSH
+tasks use the Dock Recent callback. The Dock menu may be visible briefly.
+
+CDP binds to `127.0.0.1:9222` and the sidecar to `127.0.0.1:17373`; neither is
+reachable from the LAN.
 
 ## macOS permissions
 
-Actions that simulate keyboard input require Accessibility permission. Open:
+Open:
 
 ```text
 System Settings → Privacy & Security → Accessibility
 ```
 
-Allow the Python process installed under the openCodexMicro application
-support directory. Also approve control of `System Events` if macOS asks.
+Allow the installed Python process to control `System Events`, and approve
+automation prompts if macOS asks. Bridge task switching and Focus work without
+this permission; AppleScript action keys and normal-mode SSH fallback do not.
 
-Without this permission, task switching and Focus still work, but
-AppleScript-based action keys do not.
+## Installed files and services
 
-## Installed files and service
-
-Runtime files, the Python venv, theme, caches, and logs:
+Runtime files, venv, theme, caches, and logs:
 
 ```text
 ~/Library/Application Support/openCodexMicro/
 ```
 
-LaunchAgent:
+LaunchAgents:
 
 ```text
 ~/Library/LaunchAgents/io.opencodexmicro.d200.plist
+~/Library/LaunchAgents/io.opencodexmicro.bridge.plist
 ```
 
-Inspect the service:
+Inspect or restart them:
 
 ```bash
 launchctl print "gui/$(id -u)/io.opencodexmicro.d200"
-```
-
-Restart the driver:
-
-```bash
+launchctl print "gui/$(id -u)/io.opencodexmicro.bridge"
 launchctl kickstart -k "gui/$(id -u)/io.opencodexmicro.d200"
+launchctl kickstart -k "gui/$(id -u)/io.opencodexmicro.bridge"
 ```
 
 Logs:
@@ -101,6 +142,8 @@ Logs:
 ```bash
 tail -f "$HOME/Library/Application Support/openCodexMicro/d200.log"
 tail -f "$HOME/Library/Application Support/openCodexMicro/d200-error.log"
+tail -f "$HOME/Library/Application Support/openCodexMicro/bridge.log"
+tail -f "$HOME/Library/Application Support/openCodexMicro/bridge-error.log"
 ```
 
 ## Diagnostics
@@ -108,18 +151,21 @@ tail -f "$HOME/Library/Application Support/openCodexMicro/d200-error.log"
 From the repository:
 
 ```bash
-# Validate rendering, profile ZIP generation, and HID framing without a device.
+# Validate rendering, profile ZIP generation, and HID framing.
 python3 standalone/d200.py --self-test
 
 # Read one Codex state snapshot without opening the D200.
 python3 standalone/d200.py --state
 
-# Open and identify the HID interface without writing to it.
+# Identify the HID interface without writing to it.
 python3 standalone/d200.py --diagnose
+
+# Bridge sidecar and current Codex connection.
+curl http://127.0.0.1:17373/health
+curl 'http://127.0.0.1:17373/state?refresh=1'
 ```
 
-If the current Python does not have the runtime dependencies, use the installed
-venv:
+If the current Python lacks runtime dependencies:
 
 ```bash
 "$HOME/Library/Application Support/openCodexMicro/venv/bin/python" \
@@ -129,16 +175,19 @@ venv:
 | Symptom | Check |
 | --- | --- |
 | D200 is missing or reconnecting | USB cable, port, `d200-error.log`, and `--diagnose` |
-| Task images appear but switching fails | Whether Codex handles `codex://` links |
-| Pin, New, or Steer does nothing | Accessibility permission and whether the shortcut works directly in Codex |
+| Codex Micro says `Not detected` | Launch Codex through `Codex Bridge.app`; inspect the process for `--remote-debugging-port=9222` |
+| Bridge task key does not switch | Check `bridge-error.log` and the sidecar health endpoint |
+| Normal-mode local task does not switch | Check whether Codex handles `codex://threads/<id>` |
+| Normal-mode SSH task does not switch | Grant Accessibility and confirm the exact title appears once in Dock Recent |
+| Pin, New, or Steer does nothing | Verify Accessibility and the shortcut directly in Codex |
+| Mic does nothing | Verify `realtimeVoice.toggleMicrophoneMute` in `~/.codex/keybindings.json` and test `Command+Alt+M` |
 | Theme changes do not appear | Reset the display digest as described in [Configuration](configuration.md#theme) |
 | Usage is temporarily empty | Wait for initial app-server data and check the Codex account connection |
 
 ## Update
 
-Pull the latest source, run the checks, and reinstall:
-
 ```bash
+npm install
 npm run check
 npm run setup
 ```
@@ -149,13 +198,11 @@ npm run setup
 npm run uninstall
 ```
 
-This stops and removes openCodexMicro and any recognized legacy
-CodexKeyboard services, then deletes both runtime directories. Back up a
-custom theme before uninstalling.
+This stops both openCodexMicro LaunchAgents, removes `Codex Bridge.app`, and
+deletes current and recognized legacy runtime directories. Back up a custom
+theme first.
 
 ## Development
-
-Create a local venv so checks do not modify the system Python:
 
 ```bash
 python3.11 -m venv .venv
@@ -167,13 +214,16 @@ npm run check
 Available commands:
 
 ```bash
-npm test       # Python unit tests
-npm run check  # Unit tests and Node.js syntax checks
+npm test
+npm run build:bridge
+npm run check
 ```
 
 Main entry points:
 
 - `standalone/d200.py`: HID, profiles, input path, and display queue;
-- `standalone/native_codex.py`: task state, Usage, deep links, and shortcuts;
-- `scripts/install.mjs`: installation and legacy migration;
-- `scripts/uninstall.mjs`: service and runtime removal.
+- `standalone/native_codex.py`: local/SSH state, Usage, navigation, and shortcuts;
+- `src/bridge/`: official Codex Micro renderer bridge;
+- `scripts/build-bridge.mjs`: bundle the loopback sidecar;
+- `scripts/install.mjs`: installation, wrapper packaging, and migration;
+- `scripts/uninstall.mjs`: service, wrapper, and runtime removal.

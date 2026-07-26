@@ -6,7 +6,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 MODULE_PATH = Path(__file__).parents[1] / "standalone" / "d200.py"
 SPEC = importlib.util.spec_from_file_location("d200", MODULE_PATH)
@@ -15,6 +15,13 @@ SPEC.loader.exec_module(D200)
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_idle_button_read_uses_blocking_timeout(self):
+        device = object.__new__(D200.D200)
+        device.handle = Mock()
+        device.handle.read.return_value = []
+        self.assertIsNone(device.read_button())
+        device.handle.read.assert_called_once_with(D200.REPORT_SIZE, 50)
+
     def test_default_theme_contains_every_runtime_surface(self):
         expected_tasks = {"idle", "thinking", "complete", "input", "error"}
         expected_surfaces = set(D200.ACTION_KEYS.values()) | {"usage"}
@@ -68,6 +75,8 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(D200.normalize_status("input"), "input")
         self.assertEqual(D200.normalize_status("requires-input"), "input")
         self.assertEqual(D200.normalize_status("done"), "complete")
+        self.assertEqual(D200.normalize_status("error"), "error")
+        self.assertEqual(D200.normalize_status("failed"), "error")
 
     def test_native_layout_uses_first_five_keys_and_second_row_actions(self):
         self.assertEqual(D200.ACTIVE_SLOTS, 5)
@@ -195,12 +204,14 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(partial)
         self.assertEqual(calls, [({0: b"new-zero"}, True)])
 
-    def test_usb_hotplug_discovery_does_not_back_off(self):
+    def test_usb_hotplug_discovery_backs_off_after_fast_retry(self):
         missing = D200.D200NotFoundError("not connected")
         self.assertEqual(
-            D200.reconnect_delay(missing, 100),
-            D200.DEVICE_DISCOVERY_SECONDS,
+            D200.reconnect_delay(missing, 1),
+            0.5,
         )
+        self.assertEqual(D200.reconnect_delay(missing, 2), 1.0)
+        self.assertEqual(D200.reconnect_delay(missing, 100), 5.0)
         self.assertEqual(D200.reconnect_delay(OSError("write failed"), 100), 10.0)
 
     def test_cached_profile_replays_only_after_a_real_disconnect(self):

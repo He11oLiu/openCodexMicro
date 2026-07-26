@@ -7,7 +7,7 @@ keeps device-specific visuals in a separate theme file.
 
 | D200 key | Function | Native action |
 | --- | --- | --- |
-| 1–5 | Recent tasks | Open `codex://threads/<id>` |
+| 1–5 | Recent tasks | Bridge: Codex Micro bus; normal: local deep link or SSH Dock Recent |
 | 6 | Fast | `composer.toggleFastMode` |
 | 7 | Usage / Focus | Focus Codex |
 | 8 | Pin | `toggleThreadPin` |
@@ -29,7 +29,8 @@ Codex Desktop stores shortcut overrides in:
 ~/.codex/keybindings.json
 ```
 
-Merge new entries into the existing JSON array:
+The installer adds the Mic entry when it is missing and preserves an existing
+override. Merge any other entries into the existing JSON array:
 
 ```json
 [

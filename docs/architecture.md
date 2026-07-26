@@ -1,27 +1,56 @@
 # Architecture
 
-openCodexMicro 只保留 native 集成路径，不开启 Chromium 调试端口，也不运行本地 HTTP bridge。
+openCodexMicro 的状态链路始终是事件驱动的 native 集成；任务导航额外提供可选的
+loopback-only Codex Micro bridge。
 
 ## Codex state
 
 ```text
-Codex app-server ── inventory / usage ─┐
-rollout JSONL ── kqueue events ────────┼─> NativeCodex snapshot
-codex://threads/<id> <── task key ─────┘
-                                      │
-                                      v
-                        openCodexMicro state
-                                      │
-                                      v
-                              D200 profile queue
-                                      │
-                                      v
-                                  USB HID
+本机 app-server ── inventory / usage ───────────┐
+本机 rollout ── kqueue 增量 ───────────────────┤
+Codex 全局状态 ── kqueue ── host/thread 映射 ─┤
+远端 rollout/SQLite ── SSH + inotify 增量 ────┼─> 统一 Most Recent ──> D200
+                                                │
+任务键 ──> bridge sidecar ── CDP ── Micro bus ─┤
+      └─> 本机 deep link / SSH Dock Recent 回退 ┘
+                                                │
+                                                v
+                                  openCodexMicro state
+                                                │
+                                                v
+                                        D200 profile queue
+                                                │
+                                                v
+                                            USB HID
 ```
 
-`NativeCodex` 用 app-server 获取初始 inventory 和 Usage，用 macOS kqueue 监听 rollout。新用户 rollout 从 `session_meta` 直接识别，过滤 subagent，并只解析文件尾部的当前生命周期；因此新对话不需要等待 state DB 才能进入最左键。状态变化通过 revision/condition 唤醒驱动，不做 200ms 文件遍历或每秒 `thread/list`。
+`NativeCodex` 用 app-server 获取本机初始 inventory 和 Usage，用 macOS kqueue 监听本机 rollout 与 Codex 全局状态。全局状态发现 Codex App 管理的 SSH host、project 和 thread assignment；每台活动主机只维持一条 SSH 长连接。远端 helper 用 SQLite 做连接时 inventory/事件对账，用 Linux inotify 把 rollout 的字节增量推回本机，不做 SSH 目录轮询或每秒 `thread/list`。
 
-recent/结构事件先进入 staged logical framebuffer，在 50ms 静默窗口内合并 order 与 status，然后只提交一个 revision。后台任务重新启动也从已监听 rollout 本地晋升；`thread/list` 退到事件触发的补齐和对账路径。任务对齐 Codex Micro 默认 Most Recent 模式。Usage 每十分钟有独立的硬期限；rate-limit 通知只能提前刷新。任务按键使用 `codex://` deep link，桌面动作读取 Codex 自己的 keybindings 后通过 macOS 键盘事件触发。
+本机和远端 rollout 复用同一个 lifecycle 解析器。新用户 rollout 从 `session_meta` 直接识别，过滤 subagent，并只解析文件尾部的当前生命周期。远端断线时保留最后状态并标记 `hostOnline=false`，重连后重新发送 inventory 和文件尾增量，不把掉线误报成任务失败。
+
+recent/结构事件先进入 staged logical framebuffer，在 50ms 静默窗口内合并 order 与 status，然后只提交一个 revision。后台任务重新启动也从已监听 rollout 直接晋升；`thread/list` 退到事件触发的补齐和对账路径。所有 host 按最近活动时间统一排序，对齐 Codex Micro 默认 Most Recent 模式。Usage 每十分钟有独立的硬期限；rate-limit 通知只能提前刷新。
+
+五个任务键保持独立的全局 Most Recent 顺序；统一排序发生在截断五槽之前，
+所以五个更近的本机任务会自然挤掉更旧的 SSH 任务，反之亦然。
+
+`Codex Bridge.app` 用三个参数启动真实 Codex：
+
+```text
+--remote-debugging-address=127.0.0.1
+--remote-debugging-port=9222
+--remote-allow-origins=http://127.0.0.1:9222
+```
+
+bridge sidecar 只监听 `127.0.0.1:17373`，持久连接 Codex 主 renderer。它启用
+Codex Micro gate，找到内部 event bus，先派发 `connected` 设备状态，再按
+D200 的明确 thread ID 派发官方 `codex-micro-hid-event`。Codex 自己解析保存的
+thread → host/project assignment，因此同一接口可切换本机和 SSH 任务。该路径
+不移动鼠标、不打开菜单，也不受 pinned task 或 `Command+1…9` 数量限制。
+
+普通方式启动 Codex 时没有 9222 endpoint。任务键会在当前 daemon 生命周期内
+弹一次说明；本机任务使用 `codex://threads/<id>`，SSH 任务使用 Dock **Recent**
+菜单中精确且唯一的标题回调。SSH 回退依赖 Accessibility，并可能短暂显示 Dock
+菜单；标题缺失或重名时必须拒绝，不能猜测坐标。
 
 ## D200 input and output
 
@@ -48,5 +77,8 @@ recent/结构事件先进入 staged logical framebuffer，在 50ms 静默窗口�
 - 要求 Python 3.11 或更高版本；
 - 迁移旧 CodexKeyboard 主题并清理旧服务；
 - 写入 openCodexMicro 用户级 LaunchAgent。
+- 构建并安装 loopback bridge sidecar LaunchAgent；
+- 生成、签名并安装 `~/Applications/Codex Bridge.app`；
+- 在 Mic command 缺失时补充 `Command+Alt+M`，保留已有用户覆盖。
 
 卸载器删除 openCodexMicro 以及已识别的旧 CodexKeyboard LaunchAgent 和运行目录。

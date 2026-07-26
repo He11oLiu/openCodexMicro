@@ -60,4 +60,5 @@ layout tests before editing.
 5. Remind the user that simulated shortcuts require Accessibility and
    `System Events` Automation permission.
 
-Never reintroduce the removed bridge path.
+Preserve automatic navigation selection: official Micro event bus when Codex
+was launched through `Codex Bridge.app`, native fallback otherwise.

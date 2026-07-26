@@ -1,10 +1,12 @@
+import base64
 import json
+import os
 import queue
 import select
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, Mock, patch
 from pathlib import Path
 import sys
 
@@ -16,7 +18,9 @@ from native_codex import (
     RolloutWatcher,
     composer_enter_behavior,
     configured_shortcuts,
+    dispatch_bridge_thread,
     follow_up_mode,
+    remote_hosts_from_state,
     shortcut_script,
     steer_key_script,
     usage_windows,
@@ -24,6 +28,37 @@ from native_codex import (
 
 
 class NativeCodexTests(unittest.TestCase):
+    def test_ignores_app_server_notifications_outside_status_chain(self):
+        adapter = NativeCodex(start=False)
+        adapter._on_notification({
+            "method": "item/agentMessage/delta",
+            "params": {"delta": "high-frequency output"},
+        })
+        self.assertTrue(adapter._events.empty())
+        message = {
+            "method": "turn/started",
+            "params": {"threadId": "thread-1"},
+        }
+        adapter._on_notification(message)
+        self.assertEqual(
+            adapter._events.get_nowait(),
+            ("notification", message),
+        )
+
+    def test_bridge_thread_dispatch_bypasses_proxy_and_posts_slot(self):
+        response = MagicMock()
+        response.read.return_value = b'{"ok":true,"bridge":true}'
+        opener = Mock()
+        opener.open.return_value = response
+        response.__enter__.return_value = response
+        thread_id = "019f97a7-8c15-7942-8f48-c8ca32937ceb"
+        with patch("native_codex.build_opener", return_value=opener) as build:
+            self.assertTrue(dispatch_bridge_thread(thread_id, slot=3))
+        self.assertEqual(build.call_args.args[0].proxies, {})
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.method, "POST")
+        self.assertTrue(request.full_url.endswith(f"/{thread_id}/click?slot=3"))
+
     def test_steer_inverts_codex_queue_mode_without_manual_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"
@@ -105,6 +140,93 @@ class NativeCodexTests(unittest.TestCase):
                 )
             self.assertTrue(tail.update())
             self.assertGreater(tail.completed_at, tail.started_at)
+
+    def test_rollout_tail_seeds_active_lifecycle_before_recent_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-07-26T02:22:14.267Z",
+                        "type": "event_msg",
+                        "payload": {"type": "task_started"},
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "timestamp": "2026-07-26T02:22:15.000Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "content": "x" * 2048,
+                        },
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            tail = RolloutTail(path, recent_bytes=128)
+            tail.update()
+            self.assertGreater(tail.started_at, tail.completed_at)
+
+    def test_task_complete_with_error_is_failure(self):
+        tail = RolloutTail.streamed("/remote/rollout.jsonl")
+        records = (
+            json.dumps(
+                {
+                    "timestamp": "2026-07-25T05:02:48.000Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started"},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "timestamp": "2026-07-25T05:17:52.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "task_complete",
+                        "error": {"message": "request timed out"},
+                    },
+                }
+            )
+            + "\n"
+        ).encode()
+        self.assertTrue(tail.feed(records))
+        self.assertGreaterEqual(tail.error_at, tail.completed_at)
+
+        next_turn = (
+            json.dumps(
+                {
+                    "timestamp": "2026-07-26T01:55:22.984Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started"},
+                }
+            )
+            + "\n"
+        ).encode()
+        self.assertTrue(tail.feed(next_turn))
+        self.assertEqual(tail.error_at, 0)
+        self.assertGreater(tail.started_at, tail.completed_at)
+
+        interrupted = (
+            json.dumps(
+                {
+                    "timestamp": "2026-07-26T01:55:34.181Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "turn_aborted",
+                        "reason": "interrupted",
+                    },
+                }
+            )
+            + "\n"
+        ).encode()
+        self.assertTrue(tail.feed(interrupted))
+        self.assertEqual(tail.error_at, 0)
+        self.assertGreaterEqual(tail.completed_at, tail.started_at)
 
     def test_rollout_tail_tracks_real_approval_until_matching_output(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -303,6 +425,47 @@ class NativeCodexTests(unittest.TestCase):
             self.assertFalse(adapter._threads)
             self.assertIn(str(path.resolve()), adapter._ignored_rollouts)
 
+    def test_restart_scan_does_not_promote_an_old_unwatched_rollout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stale_path = root / (
+                "rollout-2026-07-01T00-00-00-"
+                "00000000-0000-0000-0000-000000000005.jsonl"
+            )
+            stale_path.write_text(json.dumps({
+                "type": "session_meta",
+                "payload": {
+                    "id": "00000000-0000-0000-0000-000000000005",
+                    "thread_source": "user",
+                },
+            }) + "\n")
+            stale_seconds = time.time() - 86_400
+            os.utime(stale_path, (stale_seconds, stale_seconds))
+            recent_path = root / "recent.jsonl"
+            adapter = NativeCodex(start=False)
+            adapter._local_threads = [{
+                "id": "recent",
+                "hostId": "local",
+                "title": "Recent",
+                "path": str(recent_path),
+                "recencyAt": int(time.time() * 1000),
+                "status": {"type": "notLoaded"},
+            }]
+            adapter._merge_threads()
+
+            adapter._discover_rollouts(root)
+
+            self.assertEqual(adapter._threads[0]["id"], "recent")
+            stale = next(
+                thread
+                for thread in adapter._local_threads
+                if thread["id"].endswith("0005")
+            )
+            self.assertLess(
+                stale["recencyAt"],
+                adapter._threads[0]["recencyAt"],
+            )
+
     def test_new_rollout_event_commits_one_frame_without_waiting_for_inventory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -350,6 +513,15 @@ class NativeCodexTests(unittest.TestCase):
                     NativeCodex,
                     "_load_seen",
                     return_value={"existing": 0},
+                ),
+                patch.object(
+                    NativeCodex,
+                    "_sync_remote_hosts",
+                    return_value=False,
+                ),
+                patch(
+                    "native_codex.GlobalStateWatcher",
+                    lambda _path, callback: Watcher(callback),
                 ),
             ):
                 adapter = NativeCodex()
@@ -481,7 +653,7 @@ class NativeCodexTests(unittest.TestCase):
             self.assertTrue(changed)
             self.assertTrue(inventory_changed)
 
-    def test_rollout_approval_publishes_input_then_returns_to_thinking(self):
+    def test_local_pre_authorized_escalation_stays_thinking(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rollout.jsonl"
             path.write_text("")
@@ -525,7 +697,10 @@ class NativeCodexTests(unittest.TestCase):
             )
             self.assertTrue(changed)
             adapter._publish()
-            self.assertEqual(adapter.snapshot()["slots"][0]["status"], "input")
+            self.assertEqual(
+                adapter.snapshot()["slots"][0]["status"],
+                "thinking",
+            )
 
             with path.open("a") as output:
                 output.write(
@@ -548,6 +723,45 @@ class NativeCodexTests(unittest.TestCase):
                 adapter.snapshot()["slots"][0]["status"],
                 "thinking",
             )
+
+    def test_remote_rollout_approval_publishes_input(self):
+        adapter = NativeCodex(start=False)
+        adapter._threads = [
+            {
+                "id": "thread-remote",
+                "name": "Remote approval",
+                "path": "/remote/rollout.jsonl",
+                "hostId": "remote-ssh-discovered:lite-shanghai",
+                "status": {"type": "notLoaded"},
+            }
+        ]
+        tail = RolloutTail.streamed("/remote/rollout.jsonl")
+        tail.started_at = 100
+        tail.pending_input.add("call-1")
+        adapter._tails[
+            "remote-ssh-discovered:lite-shanghai:/remote/rollout.jsonl"
+        ] = tail
+        adapter._publish()
+        self.assertEqual(adapter.snapshot()["slots"][0]["status"], "input")
+
+    def test_explicit_user_input_is_input_even_for_local_task(self):
+        adapter = NativeCodex(start=False)
+        adapter._threads = [
+            {
+                "id": "thread-local",
+                "name": "Question",
+                "path": "/local/rollout.jsonl",
+                "hostId": "local",
+                "status": {"type": "notLoaded"},
+            }
+        ]
+        tail = RolloutTail.streamed("/local/rollout.jsonl")
+        tail.started_at = 100
+        tail.pending_input.add("call-1")
+        tail.pending_explicit_input.add("call-1")
+        adapter._tails["/local/rollout.jsonl"] = tail
+        adapter._publish()
+        self.assertEqual(adapter.snapshot()["slots"][0]["status"], "input")
 
     def test_rollout_failure_publishes_error_without_app_server_status(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -726,6 +940,255 @@ class NativeCodexTests(unittest.TestCase):
                 {"kind": "weekly", "remainingPercent": 10, "resetsAt": 2},
             ],
         )
+
+    def test_reads_codex_managed_remote_ssh_hosts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "global.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "codex-managed-remote-connections": [
+                            {
+                                "hostId": "remote-ssh-discovered:lite-shanghai",
+                                "alias": "lite-shanghai",
+                            },
+                            {"hostId": "local", "alias": "ignored"},
+                        ]
+                    }
+                )
+            )
+            self.assertEqual(
+                remote_hosts_from_state(path),
+                {
+                    "remote-ssh-discovered:lite-shanghai":
+                    "lite-shanghai"
+                },
+            )
+
+    def test_remote_rollout_merges_and_promotes_across_hosts(self):
+        adapter = NativeCodex(start=False)
+        adapter._local_threads = [
+            {
+                "id": "local-1",
+                "hostId": "local",
+                "name": "Local",
+                "path": "/tmp/local-rollout",
+                "recencyAt": 1000,
+                "status": {"type": "notLoaded"},
+            }
+        ]
+        host_id = "remote-ssh-discovered:lite-shanghai"
+        self.assertTrue(
+            adapter._handle_remote(
+                host_id,
+                {
+                    "type": "inventory",
+                    "threads": [
+                        {
+                            "id": "remote-1",
+                            "name": "Remote",
+                            "path": "/home/admin/rollout.jsonl",
+                            "recencyAt": 500,
+                            "status": {"type": "notLoaded"},
+                        }
+                    ],
+                },
+            )
+        )
+        self.assertEqual(
+            [thread["id"] for thread in adapter._threads],
+            ["local-1", "remote-1"],
+        )
+        initial = (
+            json.dumps(
+                {
+                    "timestamp": "2026-07-25T00:00:00.000Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started"},
+                }
+            )
+            + "\n"
+        ).encode()
+        self.assertTrue(
+            adapter._handle_remote(
+                host_id,
+                {
+                    "type": "rollout",
+                    "path": "/home/admin/rollout.jsonl",
+                    "reset": True,
+                    "data": base64.b64encode(initial).decode(),
+                },
+            )
+        )
+        self.assertEqual(adapter._threads[0]["id"], "local-1")
+        started = (
+            json.dumps(
+                {
+                    "timestamp": "2026-07-25T00:00:01.000Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started"},
+                }
+            )
+            + "\n"
+        ).encode()
+        self.assertTrue(adapter._handle_remote(
+            host_id,
+            {
+                "type": "rollout",
+                "path": "/home/admin/rollout.jsonl",
+                "data": base64.b64encode(started).decode(),
+            },
+        ))
+        self.assertEqual(adapter._threads[0]["id"], "remote-1")
+        adapter._publish()
+        slot = adapter.snapshot()["slots"][0]
+        self.assertEqual(slot["hostId"], host_id)
+        self.assertTrue(slot["hostOnline"])
+        self.assertEqual(slot["status"], "thinking")
+        self.assertTrue(adapter._handle_remote(host_id, {"type": "offline"}))
+        adapter._publish()
+        slot = adapter.snapshot()["slots"][0]
+        self.assertFalse(slot["hostOnline"])
+        self.assertEqual(slot["status"], "thinking")
+
+    def test_five_newer_local_tasks_evict_an_older_ssh_task_globally(self):
+        adapter = NativeCodex(start=False)
+        adapter._local_threads = [
+            {
+                "id": f"local-{index}",
+                "hostId": "local",
+                "recencyAt": 2000 + index,
+            }
+            for index in range(5)
+        ]
+        host_id = "remote-ssh-discovered:lite-shanghai"
+        adapter._remote_threads[host_id] = [{
+            "id": "remote-old",
+            "hostId": host_id,
+            "recencyAt": 1000,
+        }]
+
+        adapter._merge_threads()
+
+        self.assertEqual(len(adapter._threads), 5)
+        self.assertNotIn(
+            "remote-old",
+            [thread["id"] for thread in adapter._threads],
+        )
+        self.assertEqual(
+            [thread["id"] for thread in adapter._threads],
+            ["local-4", "local-3", "local-2", "local-1", "local-0"],
+        )
+
+    def test_remote_session_meta_enters_recent_before_inventory(self):
+        adapter = NativeCodex(start=False)
+        host_id = "remote-ssh-discovered:lite-shanghai"
+        thread_id = "00000000-0000-0000-0000-000000000099"
+        path = (
+            "/home/admin/.codex/sessions/2026/07/25/"
+            f"rollout-2026-07-25T00-00-01-{thread_id}.jsonl"
+        )
+        chunk = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": thread_id,
+                            "thread_source": "user",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-07-25T00:00:01.000Z",
+                        "type": "event_msg",
+                        "payload": {"type": "task_started"},
+                    }
+                ),
+            ]
+        ).encode()
+        self.assertTrue(
+            adapter._handle_remote(
+                host_id,
+                {
+                    "type": "rollout",
+                    "path": path,
+                    "reset": True,
+                    "data": base64.b64encode(chunk + b"\n").decode(),
+                },
+            )
+        )
+        self.assertEqual(adapter._threads[0]["id"], thread_id)
+        self.assertTrue(adapter._threads[0]["_provisional"])
+
+    def test_open_slot_prefers_bridge_for_remote_task(self):
+        adapter = NativeCodex(start=False)
+        host_id = "remote-ssh-discovered:lite-shanghai"
+        adapter._state["slots"] = [
+            {
+                "threadKey": "remote-1",
+                "title": "Remote task",
+                "hostId": host_id,
+            }
+        ]
+        with patch(
+            "native_codex.dispatch_bridge_thread",
+            return_value=True,
+        ) as bridge, patch(
+            "native_codex.open_remote_thread_from_dock"
+        ) as dock, patch("native_codex.subprocess.Popen") as deep_link:
+            adapter.open_slot(0)
+        bridge.assert_called_once_with("remote-1", 0)
+        dock.assert_not_called()
+        deep_link.assert_not_called()
+
+    def test_remote_task_uses_dock_recent_when_bridge_is_unavailable(self):
+        adapter = NativeCodex(start=False)
+        host_id = "remote-ssh-discovered:lite-shanghai"
+        adapter._remote_threads[host_id] = [
+            {
+                "id": "remote-1",
+                "hostId": host_id,
+                "title": "Remote task",
+                "path": "/home/admin/rollout.jsonl",
+            }
+        ]
+        adapter._state["slots"] = [{
+            "threadKey": "remote-1",
+            "title": "Remote task",
+            "hostId": host_id,
+        }]
+        with patch(
+            "native_codex.dispatch_bridge_thread",
+            return_value=False,
+        ), patch(
+            "native_codex.open_remote_thread_from_dock"
+        ) as dock, patch(
+            "native_codex.show_native_navigation_notice"
+        ) as notice, patch("native_codex.subprocess.Popen") as deep_link:
+            # This is the actual D200 action-thread call signature.
+            adapter.open_thread("remote-1")
+            adapter.open_thread("remote-1")
+        self.assertEqual(dock.call_count, 2)
+        dock.assert_called_with("Remote task")
+        notice.assert_called_once()
+        deep_link.assert_not_called()
+
+    def test_local_task_uses_deep_link_when_bridge_is_unavailable(self):
+        adapter = NativeCodex(start=False)
+        with patch(
+            "native_codex.dispatch_bridge_thread",
+            return_value=False,
+        ), patch("native_codex.subprocess.Popen") as popen, patch(
+            "native_codex.show_native_navigation_notice"
+        ) as notice:
+            adapter.open_thread("local-1", host_id="local")
+        self.assertEqual(
+            popen.call_args.args[0],
+            ["/usr/bin/open", "codex://threads/local-1"],
+        )
+        notice.assert_called_once()
 
 
 if __name__ == "__main__":

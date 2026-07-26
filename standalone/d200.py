@@ -29,6 +29,7 @@ BUTTON_COUNT = 14
 ACTIVE_SLOTS = 5
 KEEP_ALIVE_SECONDS = 30.0
 DEVICE_DISCOVERY_SECONDS = 0.5
+DEVICE_DISCOVERY_MAX_SECONDS = 5.0
 # Emergency switch for diagnosing firmware/HID output issues. Release
 # installers explicitly enable display writes.
 OUTPUT_WRITES_ENABLED = (
@@ -108,9 +109,13 @@ class D200NotFoundError(OSError):
 
 
 def reconnect_delay(error: OSError, attempt: int) -> float:
-    """Hot-plug discovery stays fast; transport failures retain safe backoff."""
+    """Keep first hot-plug retries fast without enumerating USB forever."""
     if isinstance(error, D200NotFoundError):
-        return DEVICE_DISCOVERY_SECONDS
+        return min(
+            DEVICE_DISCOVERY_MAX_SECONDS,
+            DEVICE_DISCOVERY_SECONDS
+            * (2 ** min(max(0, attempt - 1), 4)),
+        )
     return min(10.0, 0.5 * max(1, attempt))
 
 
@@ -509,7 +514,9 @@ class D200:
             raise OSError(
                 "D200 is present but its HID interface cannot be opened"
             ) from error
-        self.handle.set_nonblocking(True)
+        # Timed reads provide the same bounded input latency without spinning
+        # through hidapi when there is no report available.
+        self.handle.set_nonblocking(False)
 
     def write(self, report: bytes, context: str = "command") -> None:
         # hidapi reserves the first byte for the report ID; D200 uses report ID 0.
@@ -551,8 +558,8 @@ class D200:
         for offset in range(1016, len(profile), REPORT_SIZE):
             yield profile[offset : offset + REPORT_SIZE].ljust(REPORT_SIZE, b"\0")
 
-    def read_button(self) -> tuple[int, bool] | None:
-        raw = bytes(self.handle.read(REPORT_SIZE, 1))
+    def read_button(self, timeout_ms: int = 50) -> tuple[int, bool] | None:
+        raw = bytes(self.handle.read(REPORT_SIZE, timeout_ms))
         if raw[:1] == b"\0" and raw[1:3] == b"||":
             raw = raw[1:]
         if len(raw) < 12 or raw[:2] != b"||":
@@ -797,13 +804,16 @@ def run(
             # The D200 may still show the previous version while the new
             # profile is rendered and transferred. Its cached mapping remains
             # authoritative until the replacement upload commits.
-            active_thread_ids = load_cached_slots()
+            active_thread_routes = [
+                {"threadKey": thread_id, "hostId": None, "title": ""}
+                for thread_id in load_cached_slots()
+            ]
             last_keep_alive = time.monotonic()
             stable_since = time.monotonic()
             state_ready = threading.Event()
             last_button_at = time.monotonic()
             action_events: queue.Queue[
-                tuple[int, bool, float, str | None]
+                tuple[int, bool, float, dict | None]
             ] = queue.Queue()
             agent_executor = ThreadPoolExecutor(
                 max_workers=3,
@@ -814,7 +824,7 @@ def run(
                     str,
                     str,
                     bytes,
-                    list[str],
+                    list[dict],
                     dict[int, str],
                     bool,
                     float,
@@ -842,7 +852,7 @@ def run(
                     str,
                     str,
                     bytes,
-                    list[str],
+                    list[dict],
                     dict[int, str],
                     bool,
                     float,
@@ -941,10 +951,13 @@ def run(
                         )
                     icons[USAGE_DISPLAY_KEY] = render_usage_icon(state.get("usage"))
                     base_digest = applied_digest[0]
-                    thread_ids = [
-                        str(slot.get("threadKey"))
+                    thread_routes = [
+                        {
+                            "threadKey": str(slot.get("threadKey") or ""),
+                            "hostId": str(slot.get("hostId") or "local"),
+                            "title": str(slot.get("title") or ""),
+                        }
                         for slot in slots[:ACTIVE_SLOTS]
-                        if slot.get("threadKey")
                     ]
                     try:
                         profile, key_digests, partial = (
@@ -971,7 +984,7 @@ def run(
                                 base_digest,
                                 request["digest"],
                                 profile,
-                                thread_ids,
+                                thread_routes,
                                 key_digests,
                                 partial,
                                 request["changedAt"],
@@ -1017,15 +1030,33 @@ def run(
             def dispatch_actions() -> None:
                 def dispatch_agent(
                     index: int,
-                    thread_id: str | None,
+                    route: dict | None,
                     captured_at: float,
                 ) -> None:
                     try:
+                        thread_id = (
+                            str(route.get("threadKey") or "")
+                            if route is not None
+                            else ""
+                        )
                         if not thread_id:
                             raise RuntimeError(
                                 f"Native slot {index} has no displayed thread"
                             )
-                        native_adapter.open_thread(thread_id)
+                        native_adapter.open_thread(
+                            thread_id,
+                            host_id=(
+                                str(route.get("hostId"))
+                                if route is not None
+                                and route.get("hostId")
+                                else None
+                            ),
+                            title=(
+                                str(route.get("title") or "")
+                                if route is not None
+                                else ""
+                            ),
+                        )
                         elapsed = time.monotonic() - captured_at
                         if elapsed >= 0.100:
                             print(
@@ -1147,7 +1178,7 @@ def run(
             upload_reports = None
             upload_digest = None
             upload_profile = None
-            upload_thread_ids: list[str] = []
+            upload_thread_routes: list[dict] = []
             upload_key_digests: dict[int, str] = {}
             upload_icons: dict[int, bytes] = {}
             upload_partial = False
@@ -1158,7 +1189,9 @@ def run(
             upload_changed_at = None
             while not stopped:
                 now = time.monotonic()
-                event = device.read_button()
+                event = device.read_button(
+                    1 if upload_reports is not None else 50
+                )
                 if event:
                     index, pressed = event
                     last_button_at = now
@@ -1173,14 +1206,14 @@ def run(
                         or (pressed and index == FOCUS_KEY)
                     )
                     if should_dispatch:
-                        thread_id = (
-                            active_thread_ids[index]
+                        route = (
+                            active_thread_routes[index].copy()
                             if pressed
                             and index < ACTIVE_SLOTS
-                            and index < len(active_thread_ids)
+                            and index < len(active_thread_routes)
                             else None
                         )
-                        action_events.put((index, pressed, now, thread_id))
+                        action_events.put((index, pressed, now, route))
                     # Give the Codex dispatcher the GIL immediately and never
                     # start a synchronous HID write in the same iteration as
                     # physical input. This is the strict hot-path priority rule.
@@ -1198,7 +1231,7 @@ def run(
                             candidate_base_digest,
                             candidate_digest,
                             profile,
-                            candidate_thread_ids,
+                            candidate_thread_routes,
                             candidate_key_digests,
                             candidate_partial,
                             candidate_changed_at,
@@ -1219,7 +1252,9 @@ def run(
                         if candidate_is_current:
                             if not profile:
                                 applied_digest[0] = candidate_digest
-                                active_thread_ids[:] = candidate_thread_ids
+                                active_thread_routes[:] = (
+                                    candidate_thread_routes
+                                )
                                 applied_key_digests.clear()
                                 applied_key_digests.update(
                                     candidate_key_digests
@@ -1227,7 +1262,10 @@ def run(
                                 runtime_applied_digest = applied_digest[0]
                                 save_cached_digest(
                                     applied_digest[0],
-                                    active_thread_ids,
+                                    [
+                                        str(route.get("threadKey") or "")
+                                        for route in active_thread_routes
+                                    ],
                                     applied_key_digests,
                                 )
                                 print(
@@ -1238,7 +1276,7 @@ def run(
                                 continue
                             upload_size = len(profile)
                             upload_profile = profile
-                            upload_thread_ids = candidate_thread_ids
+                            upload_thread_routes = candidate_thread_routes
                             upload_key_digests = candidate_key_digests
                             upload_icons = candidate_icons
                             upload_partial = candidate_partial
@@ -1290,13 +1328,16 @@ def run(
                     # activation succeeds. Never expose a new mapping while
                     # the old keys are still visible.
                     applied_digest[0] = upload_digest
-                    active_thread_ids[:] = upload_thread_ids
+                    active_thread_routes[:] = upload_thread_routes
                     applied_key_digests.clear()
                     applied_key_digests.update(upload_key_digests)
                     runtime_applied_digest = applied_digest[0]
                     save_cached_digest(
                         applied_digest[0],
-                        active_thread_ids,
+                        [
+                            str(route.get("threadKey") or "")
+                            for route in active_thread_routes
+                        ],
                         applied_key_digests,
                     )
                     if upload_partial and upload_digest is not None:
@@ -1315,7 +1356,7 @@ def run(
                     upload_changed_at = None
                     upload_digest = None
                     upload_profile = None
-                    upload_thread_ids = []
+                    upload_thread_routes = []
                     upload_key_digests = {}
                     upload_icons = {}
                     upload_partial = False
@@ -1353,7 +1394,10 @@ def run(
                 if now - stable_since >= 60:
                     reconnect_attempt = 0
                     stable_since = now
-                time.sleep(0.001 if upload_reports is not None else 0.005)
+                # read_button already blocks while idle. A small upload sleep
+                # still yields to the state and action threads between reports.
+                if upload_reports is not None:
+                    time.sleep(0.001)
         except OSError as error:
             reconnect_attempt += 1
             profile_restore_required = True
