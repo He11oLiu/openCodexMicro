@@ -305,6 +305,25 @@ export class CodexCdpClient {
     }, "codex-micro-hid-event");
   }
 
+  async dispatchComposerSteer() {
+    await this.connect();
+    const clicked = await this.evaluate(`(() => {
+      const editor = [...document.querySelectorAll('[contenteditable="true"][role="textbox"]')]
+        .find((element) => element.offsetParent !== null);
+      if (!editor) throw new Error("Codex composer is not available");
+      editor.focus();
+      const steer = [...document.querySelectorAll('button')]
+        .find((element) =>
+          element.offsetParent !== null &&
+          element.getAttribute("aria-label") === "Steer"
+        );
+      if (!steer) return false;
+      steer.click();
+      return true;
+    })()`);
+    if (!clicked) throw new Error("Codex Steer action is not available");
+  }
+
   async dispatchJoystick(direction, distance) {
     const angle = { up: 0.75, right: 0, down: 0.25, left: 0.5 }[direction];
     if (angle === undefined) throw new Error(`Unknown joystick direction: ${direction}`);

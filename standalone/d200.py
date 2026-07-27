@@ -44,7 +44,7 @@ OUTPUT_WRITES_ENABLED = (
 # packet 5), while macOS' synchronous SetReport already provides backpressure.
 UPLOAD_PACKET_DELAY_SECONDS = 0.003
 COMMAND_SETTLE_SECONDS = 0.050
-PROFILE_VERSION = 25
+PROFILE_VERSION = 26
 CACHE_PATH = (
     Path.home()
     / "Library"
@@ -124,6 +124,17 @@ def should_restore_cached_profile(
     cached_profile: bytes | None,
 ) -> bool:
     return profile_restore_required and cached_profile is not None
+
+
+def display_baseline_after_connect(
+    profile_restore_required: bool,
+    runtime_digest: str,
+    cached_key_digests: dict[int, str],
+) -> tuple[str, dict[int, str]]:
+    """Forget every applied key after a USB loss, but not a daemon restart."""
+    if profile_restore_required:
+        return "", {}
+    return runtime_digest, cached_key_digests.copy()
 
 
 def normalize_status(value: object) -> str:
@@ -790,17 +801,16 @@ def run(
                 cached_profile,
             )
             # A disk digest cannot prove that the D200 still contains a complete
-            # profile: device reopen, interrupted transfer, or power loss can
-            # leave the screen blank. Confirm the profile once per driver
-            # process, then retain the digest only across in-process reconnects.
-            applied_digest = [
-                "" if restore_after_reconnect else runtime_applied_digest
-            ]
-            applied_key_digests = (
-                load_cached_key_digests()
-                if applied_digest[0]
-                else {}
+            # profile after a USB disconnect, interrupted transfer, or power
+            # loss. Force the first live frame after reconnect to contain every
+            # key, even when the cached archive itself is unavailable. A normal
+            # daemon restart with no observed disconnect may retain the digest.
+            baseline_digest, applied_key_digests = display_baseline_after_connect(
+                profile_restore_required,
+                runtime_applied_digest,
+                load_cached_key_digests(),
             )
+            applied_digest = [baseline_digest]
             # The D200 may still show the previous version while the new
             # profile is rendered and transferred. Its cached mapping remains
             # authoritative until the replacement upload commits.
@@ -1091,7 +1101,12 @@ def run(
                             continue
                         elif index in ACTION_KEYS:
                             action = ACTION_KEYS[index]
-                            if pressed:
+                            if action == "mic":
+                                native_adapter.desktop_action(
+                                    action,
+                                    pressed=pressed,
+                                )
+                            elif pressed:
                                 native_adapter.desktop_action(action)
                         elif pressed and index == USAGE_DISPLAY_KEY:
                             native_adapter.desktop_action("focus")

@@ -307,18 +307,6 @@ def desktop_settings(config_path: Path | None = None) -> dict:
     return desktop if isinstance(desktop, dict) else {}
 
 
-def follow_up_mode(config_path: Path | None = None) -> str:
-    """Read Codex's own follow-up behavior instead of duplicating a setting."""
-    desktop = desktop_settings(config_path)
-    value = desktop.get(
-        "followUpQueueMode",
-        desktop.get("follow_up_queue_mode"),
-    )
-    if value == "interrupt":
-        return "steer"
-    return str(value) if value in {"queue", "steer"} else "steer"
-
-
 def composer_enter_behavior(config_path: Path | None = None) -> str:
     desktop = desktop_settings(config_path)
     value = desktop.get(
@@ -409,18 +397,6 @@ def submit_key_script(config_path: Path | None = None) -> str:
     return "key code 36 using command down"
 
 
-def steer_key_script(config_path: Path | None = None) -> str:
-    # Desktop derives the inverse shortcut from both settings. When plain
-    # Enter sends, the inverse is Cmd+Enter; Cmd+Shift+Enter is only correct
-    # for the two Cmd+Enter send modes.
-    if follow_up_mode(config_path) == "queue":
-        if composer_enter_behavior(config_path) == "enter":
-            return "key code 36 using command down"
-        return "key code 36 using {command down, shift down}"
-    # Cmd+Enter always submits and follows the default Steer behavior.
-    return "key code 36 using command down"
-
-
 def dispatch_desktop_action(action: str) -> None:
     """Focus Codex and dispatch an action using its configured shortcut."""
     if action == "focus":
@@ -457,7 +433,6 @@ def dispatch_desktop_action(action: str) -> None:
             "realtimeVoice.toggleMicrophoneMute",
             'keystroke "m" using {command down, option down}',
         ),
-        "steer": steer_key_script(),
     }.get(action)
     if key_script is None:
         raise ValueError(f"Unsupported Codex desktop action: {action}")
@@ -494,7 +469,7 @@ def dispatch_bridge_thread(
         request = Request(url, method="POST")
         with build_opener(ProxyHandler({})).open(
             request,
-            timeout=1.2,
+            timeout=3.0,
         ) as response:
             payload = json.loads(response.read())
         return payload.get("ok") is True and payload.get("bridge") is True
@@ -506,7 +481,51 @@ def dispatch_bridge_thread(
         json.JSONDecodeError,
         TypeError,
         ValueError,
-    ):
+    ) as error:
+        print(
+            f"Codex bridge task dispatch failed: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+
+
+def dispatch_bridge_action(
+    action: str,
+    pressed: bool,
+    bridge_url: str = BRIDGE_URL,
+) -> bool:
+    """Send an action through the renderer bridge with explicit focus."""
+    if action not in {"mic", "steer"}:
+        return False
+    if action == "steer" and not pressed:
+        return True
+    phase = "down" if pressed else "up"
+    try:
+        request = Request(
+            f"{bridge_url}/action/{quote(action, safe='')}/{phase}",
+            method="POST",
+        )
+        with build_opener(ProxyHandler({})).open(
+            request,
+            timeout=1.2,
+        ) as response:
+            payload = json.loads(response.read())
+        return payload.get("ok") is True
+    except (
+        HTTPError,
+        URLError,
+        TimeoutError,
+        OSError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ) as error:
+        print(
+            f"Codex bridge {action} dispatch failed: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
         return False
 
 
@@ -2349,9 +2368,20 @@ class NativeCodex:
         self._save_seen()
         self._publish()
 
-    def desktop_action(self, action: str) -> None:
+    def desktop_action(self, action: str, pressed: bool = True) -> None:
         if action == "mark-read":
-            self.mark_all_read()
+            if pressed:
+                self.mark_all_read()
+            return
+        if action == "mic":
+            if dispatch_bridge_action(action, pressed):
+                return
+            if not pressed:
+                return
+        elif action == "steer":
+            # A shortcut fallback can submit or queue the draft instead of
+            # steering. The bridge owns this action so failure stays a no-op.
+            dispatch_bridge_action(action, pressed)
             return
         dispatch_desktop_action(action)
 

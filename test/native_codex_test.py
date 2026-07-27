@@ -18,11 +18,10 @@ from native_codex import (
     RolloutWatcher,
     composer_enter_behavior,
     configured_shortcuts,
+    dispatch_bridge_action,
     dispatch_bridge_thread,
-    follow_up_mode,
     remote_hosts_from_state,
     shortcut_script,
-    steer_key_script,
     usage_windows,
 )
 
@@ -58,31 +57,48 @@ class NativeCodexTests(unittest.TestCase):
         request = opener.open.call_args.args[0]
         self.assertEqual(request.method, "POST")
         self.assertTrue(request.full_url.endswith(f"/{thread_id}/click?slot=3"))
+        self.assertEqual(opener.open.call_args.kwargs["timeout"], 3.0)
 
-    def test_steer_inverts_codex_queue_mode_without_manual_configuration(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "config.toml"
-            path.write_text('[desktop]\nfollowUpQueueMode = "queue"\n')
-            self.assertEqual(follow_up_mode(path), "queue")
-            self.assertEqual(
-                steer_key_script(path),
-                "key code 36 using command down",
-            )
-            path.write_text('[desktop]\nfollowUpQueueMode = "steer"\n')
-            self.assertEqual(steer_key_script(path), "key code 36 using command down")
+    def test_bridge_mic_dispatch_bypasses_proxy_and_preserves_phase(self):
+        response = MagicMock()
+        response.read.return_value = b'{"ok":true}'
+        opener = Mock()
+        opener.open.return_value = response
+        response.__enter__.return_value = response
+        with patch("native_codex.build_opener", return_value=opener) as build:
+            self.assertTrue(dispatch_bridge_action("mic", pressed=False))
+        self.assertEqual(build.call_args.args[0].proxies, {})
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.method, "POST")
+        self.assertTrue(request.full_url.endswith("/action/mic/up"))
 
-    def test_steer_uses_shift_for_cmd_enter_send_modes(self):
+    def test_bridge_steer_invokes_the_renderer_action(self):
+        response = MagicMock()
+        response.read.return_value = b'{"ok":true}'
+        opener = Mock()
+        opener.open.return_value = response
+        response.__enter__.return_value = response
+        with patch("native_codex.build_opener", return_value=opener):
+            self.assertTrue(dispatch_bridge_action("steer", pressed=True))
+        request = opener.open.call_args.args[0]
+        self.assertTrue(request.full_url.endswith("/action/steer/down"))
+
+    def test_bridge_steer_failure_never_falls_back_to_submit_shortcut(self):
+        adapter = NativeCodex(start=False)
+        with patch(
+            "native_codex.dispatch_bridge_action",
+            return_value=False,
+        ), patch("native_codex.dispatch_desktop_action") as fallback:
+            adapter.desktop_action("steer")
+        fallback.assert_not_called()
+
+    def test_submit_uses_cmd_enter_when_configured(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"
             path.write_text(
-                '[desktop]\nfollowUpQueueMode = "queue"\n'
-                'composerEnterBehavior = "cmdAlways"\n'
+                '[desktop]\ncomposerEnterBehavior = "cmdAlways"\n'
             )
             self.assertEqual(composer_enter_behavior(path), "cmdAlways")
-            self.assertEqual(
-                steer_key_script(path),
-                "key code 36 using {command down, shift down}",
-            )
 
     def test_reads_and_translates_codex_keybindings(self):
         with tempfile.TemporaryDirectory() as directory:

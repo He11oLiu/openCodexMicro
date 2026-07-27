@@ -24,7 +24,7 @@ you use most under your fingertips.
 | Clock and Focus | Keeps the D200 firmware clock and uses it as a Codex focus key |
 | Event-driven integration | Uses Codex app-server, rollout events, persistent SSH, plus an optional loopback-only official-Micro bridge |
 | Responsive display | Sends only changed keys and keeps input ahead of display transfers |
-| Hot-plug recovery | Reconnects to the D200 and restores its last known display |
+| Hot-plug recovery | Reconnects to the D200, restores its last known display, then fully refreshes all keys |
 
 ![openCodexMicro flat key layout](docs/images/open-codex-micro-layout.png)
 
@@ -59,7 +59,8 @@ For fast direct switching, quit Codex and double-click **Codex Bridge.app**.
 It starts the real Codex executable with a loopback-only CDP endpoint. Task
 keys then use Codex's own Micro event bus, including its saved SSH
 host/project routing. The official Micro page reports the emulated device as
-connected.
+connected. Steer invokes Codex's real composer action instead of synthesizing
+an Enter shortcut, and Mic sends the official Micro press/release events.
 
 If Codex was launched normally, the first task press explains that Bridge mode
 is inactive. Local tasks use `codex://threads/<id>`; SSH tasks use Codex's
@@ -67,9 +68,11 @@ native Dock **Recent** callback by exact title. The Dock menu can appear
 briefly. This fallback never moves the pointer or depends on screen
 coordinates, but it requires macOS Accessibility permission.
 
-The installer also adds
-`realtimeVoice.toggleMicrophoneMute → Command+Alt+M` when that Codex shortcut
-is absent; an existing user override is preserved.
+When Bridge mode is unavailable, Mic falls back to the configured
+`realtimeVoice.toggleMicrophoneMute` shortcut. The installer adds
+`Command+Alt+M` only when that command has no binding; an existing user
+override is preserved. Steer deliberately has no shortcut fallback because
+Enter variants can submit or queue instead of steering.
 
 See [Setup and operations](docs/setup-and-operations.md) for permissions,
 logs, diagnostics, updates, migration, and uninstall instructions.
@@ -85,7 +88,7 @@ Shortcut overrides:
 ~/.codex/keybindings.json
 ```
 
-Submit and Steer behavior:
+Submit behavior:
 
 ```text
 ~/.codex/config.toml
@@ -102,6 +105,8 @@ do not require a driver restart. Theme changes require a display refresh.
 
 See [Configuration](docs/configuration.md) for supported commands, shortcut
 syntax, Submit/Steer behavior, physical key remapping, and theme options.
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 The repository also includes reusable Codex skills:
 

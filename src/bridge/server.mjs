@@ -101,7 +101,7 @@ const server = createServer(async (request, response) => {
     }
   }
   const action = request.method === "POST" && url.pathname.match(
-    /^\/action\/(fast|approve|reject|fork|mic|submit)\/(down|up)$/
+    /^\/action\/(fast|approve|reject|fork|mic|steer|submit)\/(down|up)$/
   );
   if (action) {
     const keys = {
@@ -113,6 +113,13 @@ const server = createServer(async (request, response) => {
       submit: "ACT12"
     };
     try {
+      if (action[1] === "steer") {
+        if (action[2] === "down") {
+          await focusCodex();
+          await client.dispatchComposerSteer();
+        }
+        return json(response, 200, { ok: true });
+      }
       await client.dispatchAction(keys[action[1]], action[2] === "down" ? 1 : 0);
       return json(response, 200, { ok: true });
     } catch (error) {

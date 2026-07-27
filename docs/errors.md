@@ -19,6 +19,8 @@
 - `IOHIDDeviceSetReport` 可能异常变慢或失败；写入有有限重试和慢写日志。
 - `0x000d` 是局部 ZIP 事务，不是单个 HID report；包间仍要短且稳定。
 - USB 拔插是正常状态。守护进程应快速重新发现设备，并恢复最后成功 profile。
+- USB 断开后磁盘摘要不能证明设备仍保有完整 framebuffer。重连必须清空整帧与
+  逐键摘要并全量刷新；只有未观察到断线的普通 daemon 重启可以复用摘要。
 - 30 秒固件时钟保活必须保留，但要避开按键和正在进行的 profile 包。
 
 ## State consistency
@@ -33,6 +35,10 @@
 - Bridge 导航必须使用 D200 当前槽位的明确 thread ID，通过 Codex Micro
   event bus 交给 Codex 自己解析 host/project assignment；禁止退回 pinned
   task 会占位的 `Command+1…9`。
+- Steer 必须调用 renderer 暴露的真实 Steer action。找不到 action 时保持 no-op
+  并记录失败；禁止回退到 Enter 组合键，因为它可能发送或排队。
+- Mic 必须保留 down/up 两个物理阶段并映射到 Micro `ACT10`；不能只在按下时
+  模拟一次快捷键。
 - Bridge 端口只能绑定 `127.0.0.1`。sidecar 不得监听 LAN，也不得把 CDP
   WebSocket 暴露给非本机来源。
 - 非 Bridge 模式必须明确说明当前回退。SSH 只允许使用 Dock **Recent** 的

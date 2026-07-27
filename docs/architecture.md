@@ -46,6 +46,9 @@ Codex Micro gate，找到内部 event bus，先派发 `connected` 设备状态�
 D200 的明确 thread ID 派发官方 `codex-micro-hid-event`。Codex 自己解析保存的
 thread → host/project assignment，因此同一接口可切换本机和 SSH 任务。该路径
 不移动鼠标、不打开菜单，也不受 pinned task 或 `Command+1…9` 数量限制。
+Mic 通过 Micro 的 `ACT10` down/up 事件保留按下/抬起语义。Steer 聚焦当前可见
+composer 并直接点击 renderer 的真实 Steer action；这会复用 Codex 内部的
+本机/远端 host 路由，且不会把失败误退化成普通发送。
 
 普通方式启动 Codex 时没有 9222 endpoint。任务键会在当前 daemon 生命周期内
 弹一次说明；本机任务使用 `codex://threads/<id>`，SSH 任务使用 Dock **Recent**
@@ -65,6 +68,8 @@ thread → host/project assignment，因此同一接口可切换本机和 SSH �
 7. ZIP 传输完成后，用固件激活命令一次提交像素、图片摘要和按键到 thread 的映射。
 8. 事务期间若目标已经变化，当前 framebuffer 激活后直接构建最终目标，不重放中间版本。
 9. 局部画面可见后，低优先级线程才重建完整的 USB 重连缓存。
+10. 一旦观察到真实 USB 断开，重连会清空整帧及所有逐键摘要；缓存画面用于立即
+    恢复可见内容，随后实时状态必须以完整 profile 重传全部键。
 
 固定功能键从磁盘预渲染素材读取并缓存。只有变化的任务键或 Usage 会进入线上的 sparse profile；未变化任务键与固定键不重新传输。D200 固件时钟不属于图片 profile，驱动每 30 秒发送 mode 1 保活。
 

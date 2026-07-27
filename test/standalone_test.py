@@ -219,6 +219,24 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(D200.should_restore_cached_profile(True, None))
         self.assertTrue(D200.should_restore_cached_profile(True, b"profile"))
 
+    def test_usb_reconnect_forgets_every_applied_key_digest(self):
+        digest, keys = D200.display_baseline_after_connect(
+            True,
+            "previous-frame",
+            {0: "key-zero", 11: "mic"},
+        )
+        self.assertEqual(digest, "")
+        self.assertEqual(keys, {})
+
+    def test_daemon_restart_keeps_the_applied_display_baseline(self):
+        digest, keys = D200.display_baseline_after_connect(
+            False,
+            "previous-frame",
+            {0: "key-zero"},
+        )
+        self.assertEqual(digest, "previous-frame")
+        self.assertEqual(keys, {0: "key-zero"})
+
     def test_cached_button_mapping_survives_profile_version_upgrade(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / "cache.json"

@@ -59,7 +59,8 @@ sidecar LaunchAgents. It also installs and ad-hoc signs:
 ```
 
 The installer adds `realtimeVoice.toggleMicrophoneMute → Command+Alt+M` only
-when that Codex command has no existing shortcut override.
+when that Codex command has no existing shortcut override. It is the Mic
+fallback; Bridge mode uses the official Micro press/release path.
 
 To install files without starting either LaunchAgent:
 
@@ -175,12 +176,14 @@ If the current Python lacks runtime dependencies:
 | Symptom | Check |
 | --- | --- |
 | D200 is missing or reconnecting | USB cable, port, `d200-error.log`, and `--diagnose` |
+| D200 reconnects but some keys stay stale | Confirm the log shows `uploading full profile`; version 0.2.1 forgets all per-key digests after a real USB loss |
 | Codex Micro says `Not detected` | Launch Codex through `Codex Bridge.app`; inspect the process for `--remote-debugging-port=9222` |
 | Bridge task key does not switch | Check `bridge-error.log` and the sidecar health endpoint |
 | Normal-mode local task does not switch | Check whether Codex handles `codex://threads/<id>` |
 | Normal-mode SSH task does not switch | Grant Accessibility and confirm the exact title appears once in Dock Recent |
-| Pin, New, or Steer does nothing | Verify Accessibility and the shortcut directly in Codex |
-| Mic does nothing | Verify `realtimeVoice.toggleMicrophoneMute` in `~/.codex/keybindings.json` and test `Command+Alt+M` |
+| Steer does nothing | Launch through `Codex Bridge.app`, check bridge health, and confirm a running task exposes the composer Steer action |
+| Mic does nothing | In Bridge mode check bridge health; otherwise verify `realtimeVoice.toggleMicrophoneMute` in `~/.codex/keybindings.json` |
+| Pin or New does nothing | Verify Accessibility and the shortcut directly in Codex |
 | Theme changes do not appear | Reset the display digest as described in [Configuration](configuration.md#theme) |
 | Usage is temporarily empty | Wait for initial app-server data and check the Codex account connection |
 

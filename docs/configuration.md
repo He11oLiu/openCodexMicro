@@ -13,8 +13,8 @@ keeps device-specific visuals in a separate theme file.
 | 8 | Pin | `toggleThreadPin` |
 | 9 | New | `newTask` |
 | 10 | Fork | `forkThread` |
-| 11 | Steer | Derived from the Codex Desktop settings |
-| 12 | Mic | `realtimeVoice.toggleMicrophoneMute` |
+| 11 | Steer | Bridge invokes the visible composer's real Steer action |
+| 12 | Mic | Bridge Micro `ACT10` down/up; configured shortcut fallback |
 | 13 | Submit | `composer.submit` |
 | 14 | Clock / Focus | Focus Codex |
 
@@ -87,7 +87,7 @@ key.
 
 ## Submit and Steer
 
-Submit and Steer also follow the Desktop section in:
+Submit follows the Desktop section in:
 
 ```text
 ~/.codex/config.toml
@@ -107,23 +107,26 @@ follow_up_queue_mode = "queue"
 composer_enter_behavior = "enter"
 ```
 
-Supported values:
-
-- `followUpQueueMode`: `queue` or `steer`; legacy `interrupt` is treated as
-  `steer`;
-- `composerEnterBehavior`: `enter`, `cmdIfMultiline`, or `cmdAlways`.
+Supported `composerEnterBehavior` values are `enter`, `cmdIfMultiline`, and
+`cmdAlways`.
 
 `composer.submit` in `keybindings.json` takes priority for Submit. Without an
 override, Submit uses `Enter` when `composerEnterBehavior` is `enter`, and
 `Command+Enter` otherwise.
 
-Steer is derived from the Codex settings:
+In Bridge mode, Steer focuses the visible composer and invokes Codex's actual
+React **Steer** action. This keeps Codex's internal local/remote host routing
+and avoids the unreliable application-level focus used by older versions.
+It intentionally does not fall back to an Enter shortcut: on current Codex
+versions that can submit or queue the draft instead of steering it. Launch
+Codex through `Codex Bridge.app` to use the physical Steer key.
 
-- Queue with plain Enter submission: `Command+Enter`;
-- Queue with Command-Enter submission: `Command+Shift+Enter`;
-- Steer mode: Codex's default `Command+Enter` behavior.
+When Codex is running through `Codex Bridge.app`, Mic uses the official Codex
+Micro double-key HID slot (`ACT10_ACT11`, dispatched through physical
+`ACT10` down/up events). The configured `realtimeVoice.toggleMicrophoneMute`
+shortcut remains the fallback when the bridge is unavailable.
 
-These settings are read when a key is pressed and do not require a restart.
+Shortcut settings are read when a key is pressed and do not require a restart.
 
 ## Physical key layout
 

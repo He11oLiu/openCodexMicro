@@ -19,7 +19,7 @@ openCodexMicro 为 Codex Desktop 提供一块专用硬件控制面板：直接�
 | 时钟与 Focus | 保留 D200 固件时钟，按下可聚焦 Codex |
 | 事件驱动集成 | 使用 Codex app-server、rollout 事件、持久 SSH，以及可选的本机官方 Micro bridge |
 | 响应式显示 | 只传输发生变化的键，并始终优先处理实体输入 |
-| 热插拔恢复 | D200 重新连接后恢复最后一次成功画面 |
+| 热插拔恢复 | D200 重连后先恢复最后成功画面，再全量刷新所有按键 |
 
 ![openCodexMicro 平面键位示意图](docs/images/open-codex-micro-layout.png)
 
@@ -51,15 +51,19 @@ sidecar 两个用户级 LaunchAgent，并把 **Codex Bridge.app** 安装到
 要使用最快的直接跳转，先完全退出 Codex，再双击
 `~/Applications/Codex Bridge.app`。它会给真实 Codex 可执行文件增加仅绑定
 回环地址的 CDP 参数。任务键随后复用 Codex 官方 Micro event bus，包括 Codex
-保存的 SSH host/project 路由；官方 Micro 设置页会显示模拟设备已连接。
+保存的 SSH host/project 路由；官方 Micro 设置页会显示模拟设备已连接。Steer
+直接触发 Codex composer 的真实操作，不再模拟 Enter 组合键；Mic 发送官方
+Micro 的按下/抬起事件。
 
 如果 Codex 是普通方式启动，第一次按任务键会说明当前没有启用 Bridge。
 本机任务走 `codex://threads/<id>`，SSH 任务按精确标题调用 Codex Dock
 右键菜单里的原生 **Recent** 回调。Dock 菜单可能短暂出现；该回退不移动鼠标、
 不依赖屏幕坐标，但需要 macOS 辅助功能权限。
 
-安装器还会在缺失时补充
-`realtimeVoice.toggleMicrophoneMute → Command+Alt+M`；已有用户自定义不会被覆盖。
+Bridge 不可用时，Mic 才回退到配置的
+`realtimeVoice.toggleMicrophoneMute` 快捷键。安装器会在缺失时补充
+`Command+Alt+M`，已有用户自定义不会被覆盖。Steer 不做快捷键回退，因为
+Enter 组合键可能变成普通发送或排队。
 
 权限、日志、诊断、更新、迁移和卸载方法见 [安装与运行](docs/setup-and-operations.md)。
 
@@ -73,7 +77,7 @@ openCodexMicro 直接跟随 Codex Desktop 的快捷键，不维护第二套快�
 ~/.codex/keybindings.json
 ```
 
-Submit 和 Steer 行为：
+Submit 行为：
 
 ```text
 ~/.codex/config.toml
@@ -88,6 +92,8 @@ Submit 和 Steer 行为：
 快捷键和 Desktop 设置会在按键时读取，通常无需重启驱动；主题变化需要刷新设备画面。
 
 支持的 command、快捷键格式、Submit/Steer 行为、实体键位调整和主题选项见 [配置详解](docs/configuration.md)。
+
+版本说明见 [CHANGELOG.md](CHANGELOG.md)。
 
 仓库还包含三个可复用的 Codex skill：
 
