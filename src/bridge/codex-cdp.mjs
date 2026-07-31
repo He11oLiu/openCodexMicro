@@ -12,6 +12,15 @@ const DEVICE_STATE = {
   type: "codex-micro-device-state-changed",
   state: { status: "connected", error: null, battery: { percentage: 100, isCharging: true } }
 };
+const MICRO_ACTION_KEYS = Object.freeze({
+  fast: "ACT06",
+  approve: "ACT07",
+  reject: "ACT08",
+  fork: "ACT09",
+  mic: "ACT10",
+  submit: "ACT12"
+});
+const RENDERER_ACTIONS = new Set(["pin", "new"]);
 
 const ENABLE_EXPRESSION = `(async () => {
   const gateName = "3207467860";
@@ -344,6 +353,49 @@ export class CodexCdpClient {
       type: "codex-micro-hid-event",
       event: { key, act, slot: null, threadKey: null }
     }, "codex-micro-hid-event");
+  }
+
+  async dispatchNamedAction(action, pressed) {
+    const key = MICRO_ACTION_KEYS[action];
+    if (key) return this.dispatchAction(key, pressed ? 1 : 0);
+    if (!RENDERER_ACTIONS.has(action)) {
+      throw new Error(`Unsupported Codex bridge action: ${action}`);
+    }
+    if (!pressed) return true;
+    return this.dispatchRendererAction(action);
+  }
+
+  async dispatchRendererAction(action) {
+    await this.connect();
+    const invoked = await this.evaluate(`(() => {
+      const action = ${JSON.stringify(action)};
+      const visible = (element) => element && element.offsetParent !== null;
+      let target = null;
+      if (action === "pin") {
+        const active = document.querySelector(
+          "[data-app-action-sidebar-thread-active=true]"
+        ) ?? document.querySelector(
+          "[data-app-action-sidebar-thread-id][aria-current=page]"
+        );
+        target = active && [...active.querySelectorAll("button")].find(
+          (button) => visible(button) && ["Pin chat", "Unpin chat"].includes(
+            button.getAttribute("aria-label")
+          )
+        );
+      } else if (action === "new") {
+        const buttons = [...document.querySelectorAll("button")].filter(visible);
+        target = buttons.find(
+          (button) => button.getAttribute("aria-label") === "New chat"
+        ) ?? buttons.find(
+          (button) => (button.innerText || "").trim() === "New chat"
+        );
+      }
+      if (!target) return false;
+      target.click();
+      return true;
+    })()`);
+    if (!invoked) throw new Error(`Codex ${action} action is not available`);
+    return true;
   }
 
   async dispatchComposerSteer() {

@@ -8,14 +8,14 @@ keeps device-specific visuals in a separate theme file.
 | D200 key | Function | Native action |
 | --- | --- | --- |
 | 1–5 | Recent tasks | Bridge Micro store/event bus; normal launch: local-only fallback |
-| 6 | Fast | `composer.toggleFastMode` |
+| 6 | Fast | Bridge Micro `ACT06` down/up; shortcut fallback |
 | 7 | Usage / Focus | Focus Codex |
-| 8 | Pin | `toggleThreadPin` |
-| 9 | New | `newTask` |
-| 10 | Fork | `forkThread` |
+| 8 | Pin | Bridge invokes the active task's Pin/Unpin control; shortcut fallback |
+| 9 | New | Bridge invokes the renderer's New chat control; shortcut fallback |
+| 10 | Fork | Bridge Micro `ACT09` down/up; shortcut fallback |
 | 11 | Steer | Bridge invokes the visible composer's real Steer action |
 | 12 | Mic | Bridge Micro `ACT10` down/up; configured shortcut fallback |
-| 13 | Submit | `composer.submit` |
+| 13 | Submit | Bridge Micro `ACT12` down/up; shortcut fallback |
 | 14 | Clock / Focus | Focus Codex |
 
 Changing a shortcut affects behavior only; it does not change the icon shown
@@ -85,7 +85,19 @@ The file is read for every action, so restarting openCodexMicro is normally
 not required. Test the shortcut in Codex Desktop before testing the physical
 key.
 
-## Submit and Steer
+## Bridge actions, Submit, and Steer
+
+When the adapter's current source is Bridge, Fast, Fork, Submit, and Mic use
+Codex Micro HID events. Pin and New use the matching renderer controls because
+the Micro protocol has no dedicated fixed Pin or New slot. All physical
+press/release phases reach the Bridge; one-shot renderer controls execute only
+on key down.
+
+Bridge actions deliberately do not fall back to AppleScript after a failed or
+timed-out HTTP response. The action may already have executed before the
+response was lost, and replaying New, Fork, Submit, or a toggle would duplicate
+or reverse the user's command. Configured shortcuts are used only after the
+state adapter has switched to local-only mode.
 
 Submit follows the Desktop section in:
 
@@ -124,7 +136,7 @@ Codex through `Codex Bridge.app` to use the physical Steer key.
 When Codex is running through `Codex Bridge.app`, Mic uses the official Codex
 Micro double-key HID slot (`ACT10_ACT11`, dispatched through physical
 `ACT10` down/up events). The configured `realtimeVoice.toggleMicrophoneMute`
-shortcut remains the fallback when the bridge is unavailable.
+shortcut remains the fallback after the adapter enters local-only mode.
 
 Shortcut settings are read when a key is pressed and do not require a restart.
 

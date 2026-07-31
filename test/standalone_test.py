@@ -247,7 +247,7 @@ class ProtocolTests(unittest.TestCase):
             adapter.desktop_action.call_args_list,
             [
                 unittest.mock.call("steer", pressed=True),
-                unittest.mock.call("submit"),
+                unittest.mock.call("submit", pressed=True),
             ],
         )
 
@@ -259,18 +259,17 @@ class ProtocolTests(unittest.TestCase):
         with patch.object(D200.sys, "stderr", broken_stderr):
             self.assertFalse(D200.dispatch_surface_action(adapter, 10, True))
 
-    def test_mic_and_steer_preserve_press_and_release_phases(self):
+    def test_every_action_preserves_press_and_release_phases(self):
         adapter = Mock()
-        for index in (10, 11):
+        for index in sorted(D200.ACTION_KEYS):
             self.assertTrue(D200.dispatch_surface_action(adapter, index, True))
             self.assertTrue(D200.dispatch_surface_action(adapter, index, False))
         self.assertEqual(
             adapter.desktop_action.call_args_list,
             [
-                unittest.mock.call("steer", pressed=True),
-                unittest.mock.call("steer", pressed=False),
-                unittest.mock.call("mic", pressed=True),
-                unittest.mock.call("mic", pressed=False),
+                unittest.mock.call(D200.ACTION_KEYS[index], pressed=pressed)
+                for index in sorted(D200.ACTION_KEYS)
+                for pressed in (True, False)
             ],
         )
 

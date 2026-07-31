@@ -150,10 +150,7 @@ def dispatch_surface_action(
     try:
         if index in ACTION_KEYS:
             action = ACTION_KEYS[index]
-            if action in {"mic", "steer"}:
-                native_adapter.desktop_action(action, pressed=pressed)
-            elif pressed:
-                native_adapter.desktop_action(action)
+            native_adapter.desktop_action(action, pressed=pressed)
         elif pressed and index in {USAGE_DISPLAY_KEY, FOCUS_KEY}:
             native_adapter.desktop_action("focus")
         return True

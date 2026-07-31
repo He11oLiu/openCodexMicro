@@ -111,17 +111,9 @@ const server = createServer(async (request, response) => {
     }
   }
   const action = request.method === "POST" && url.pathname.match(
-    /^\/action\/(fast|approve|reject|fork|mic|steer|submit)\/(down|up)$/
+    /^\/action\/(fast|approve|reject|pin|new|fork|mic|steer|submit)\/(down|up)$/
   );
   if (action) {
-    const keys = {
-      fast: "ACT06",
-      approve: "ACT07",
-      reject: "ACT08",
-      fork: "ACT09",
-      mic: "ACT10",
-      submit: "ACT12"
-    };
     try {
       if (action[1] === "steer") {
         if (action[2] === "down") {
@@ -130,8 +122,8 @@ const server = createServer(async (request, response) => {
         }
         return json(response, 200, { ok: true });
       }
-      await client.dispatchAction(keys[action[1]], action[2] === "down" ? 1 : 0);
-      return json(response, 200, { ok: true });
+      await client.dispatchNamedAction(action[1], action[2] === "down");
+      return json(response, 200, { ok: true, bridge: true });
     } catch (error) {
       return json(response, 503, { ok: false, error: error.message });
     }

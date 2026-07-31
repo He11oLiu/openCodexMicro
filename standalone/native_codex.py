@@ -50,6 +50,15 @@ SEEN_PATH = APP_ROOT / "native-seen.json"
 KEYBINDINGS_PATH = Path.home() / ".codex" / "keybindings.json"
 GLOBAL_STATE_PATH = Path.home() / ".codex" / ".codex-global-state.json"
 BRIDGE_URL = "http://127.0.0.1:17373"
+BRIDGE_ACTIONS = frozenset({
+    "fast",
+    "pin",
+    "new",
+    "fork",
+    "mic",
+    "steer",
+    "submit",
+})
 SLOT_COUNT = 5
 MAX_WATCHED_ROLLOUTS = 2048
 APP_SERVER_NOTIFICATION_METHODS = {
@@ -526,9 +535,9 @@ def dispatch_bridge_action(
     bridge_url: str = BRIDGE_URL,
 ) -> bool:
     """Send an action through the renderer bridge with explicit focus."""
-    if action not in {"mic", "steer"}:
+    if action not in BRIDGE_ACTIONS:
         return False
-    if action == "steer" and not pressed:
+    if action in {"pin", "new"} and not pressed:
         return True
     phase = "down" if pressed else "up"
     try:
@@ -2445,15 +2454,14 @@ class NativeCodex:
             if pressed:
                 self.mark_all_read()
             return
-        if action == "mic":
+        if action in BRIDGE_ACTIONS:
             if dispatch_bridge_action(action, pressed):
                 return
             if not pressed:
                 return
-        elif action == "steer":
+        if action == "steer":
             # A shortcut fallback can submit or queue the draft instead of
             # steering. The bridge owns this action so failure stays a no-op.
-            dispatch_bridge_action(action, pressed)
             return
         dispatch_desktop_action(action)
 
@@ -2662,17 +2670,22 @@ class CodexStateAdapter:
         )
 
     def desktop_action(self, action: str, pressed: bool = True) -> None:
-        if action in {"mic", "steer"}:
-            if dispatch_bridge_action(
+        with self._lock:
+            bridge_mode = self._state.get("source") == "bridge"
+        if action in BRIDGE_ACTIONS and bridge_mode:
+            # Never replay a one-shot action through AppleScript after a bridge
+            # error: New/Fork/Submit may already have executed before the HTTP
+            # response was lost.
+            dispatch_bridge_action(
                 action,
                 pressed,
                 bridge_url=self._bridge_url,
-            ):
-                return
-            with self._lock:
-                bridge_mode = self._state.get("source") == "bridge"
-            if action == "steer" or bridge_mode or not pressed:
-                return
+            )
+            return
+        if not pressed:
+            return
+        if action == "steer":
+            return
         dispatch_desktop_action(action)
 
     def close(self) -> None:

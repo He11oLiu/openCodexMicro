@@ -49,6 +49,10 @@
   并记录失败；禁止回退到 Enter 组合键，因为它可能发送或排队。
 - Mic 必须保留 down/up 两个物理阶段并映射到 Micro `ACT10`；不能只在按下时
   模拟一次快捷键。
+- Bridge 已经接管动作时，HTTP 超时或 503 后不能再用 AppleScript 重放。
+  renderer 可能已经执行但响应丢失，重放会造成双重 New/Fork/Submit，或把
+  Fast、Pin、Mic 这类 toggle 立即切回原状态。只有 source 明确切换到
+  local-only 后才允许快捷键路径。
 - 长生命周期动作 dispatcher 必须逐动作捕获异常。Bridge 503、日志输出失败或
   单个 action bug 都不能让后续 Send、Steer、Mic 停止消费。
 - Bridge 端口只能绑定 `127.0.0.1`。sidecar 不得监听 LAN，也不得把 CDP

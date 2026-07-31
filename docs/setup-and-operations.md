@@ -183,7 +183,8 @@ If the current Python lacks runtime dependencies:
 | Remote task is missing | Launch through `Codex Bridge.app`; normal mode intentionally shows local tasks only |
 | Steer does nothing | Launch through `Codex Bridge.app`, check bridge health, and confirm a running task exposes the composer Steer action |
 | Mic does nothing | In Bridge mode check bridge health; otherwise verify `realtimeVoice.toggleMicrophoneMute` in `~/.codex/keybindings.json` |
-| Pin or New does nothing | Verify Accessibility and the shortcut directly in Codex |
+| A Bridge action does nothing | Check `bridge-error.log` first. Fast/Fork/Submit/Mic require the Micro event handler; Pin/New require the matching visible renderer control. Bridge errors intentionally do not replay through AppleScript |
+| Pin or New does nothing in local-only mode | Verify Accessibility and the configured shortcut directly in Codex |
 | Theme changes do not appear | Reset the display digest as described in [Configuration](configuration.md#theme) |
 | Usage is temporarily empty | Wait for initial app-server data and check the Codex account connection |
 

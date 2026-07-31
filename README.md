@@ -60,7 +60,9 @@ It starts the real Codex executable with a loopback-only CDP endpoint. Task
 keys then use Codex's own Micro event bus, including its saved SSH
 host/project routing. The official Micro page reports the emulated device as
 connected. Steer invokes Codex's real composer action instead of synthesizing
-an Enter shortcut, and Mic sends the official Micro press/release events.
+an Enter shortcut. Fast, Fork, Submit, and Mic use Codex Micro events; Pin and
+New invoke the matching renderer controls. When Bridge mode is active these
+actions never replay through AppleScript after an uncertain HTTP response.
 
 The Bridge refreshes its cached renderer snapshot every 500ms. Expensive asset
 discovery and React Fiber traversal run only once per renderer lifecycle;

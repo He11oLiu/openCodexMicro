@@ -52,8 +52,9 @@ sidecar 两个用户级 LaunchAgent，并把 **Codex Bridge.app** 安装到
 `~/Applications/Codex Bridge.app`。它会给真实 Codex 可执行文件增加仅绑定
 回环地址的 CDP 参数。任务键随后复用 Codex 官方 Micro event bus，包括 Codex
 保存的 SSH host/project 路由；官方 Micro 设置页会显示模拟设备已连接。Steer
-直接触发 Codex composer 的真实操作，不再模拟 Enter 组合键；Mic 发送官方
-Micro 的按下/抬起事件。
+直接触发 Codex composer 的真实操作，不再模拟 Enter 组合键；Fast、Fork、
+Submit 和 Mic 发送官方 Micro 事件，Pin 和 New 调用对应的 renderer 控件。
+Bridge 模式中若 HTTP 响应不确定，不会再用 AppleScript 重放动作。
 
 Bridge 每 500ms 更新一次 renderer 状态缓存。JS 资源发现和 React Fiber 遍历
 只在每个 renderer 生命周期首次执行；后续快照直接读取缓存的 Micro store 引用。
@@ -63,8 +64,8 @@ Bridge 每 500ms 更新一次 renderer 状态缓存。JS 资源发现和 React F
 app-server/rollout 回退，只显示本机任务；默认不再建立 SSH 连接或读取远端
 SQLite。旧的本机/SSH monitor 仅通过 `--native-state` 显式诊断模式保留。
 
-Bridge 不可用时，Mic 才回退到配置的
-`realtimeVoice.toggleMicrophoneMute` 快捷键。安装器会在缺失时补充
+Bridge 不可用并进入 local-only 模式后，这些功能键才使用 Codex 配置的快捷键。
+Mic 对应 `realtimeVoice.toggleMicrophoneMute`；安装器会在缺失时补充
 `Command+Alt+M`，已有用户自定义不会被覆盖。Steer 不做快捷键回退，因为
 Enter 组合键可能变成普通发送或排队。
 

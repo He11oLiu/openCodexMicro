@@ -6,6 +6,7 @@ import {
   localThreadKey,
   validateThreadId
 } from "../src/bridge/thread-key.mjs";
+import { CodexCdpClient } from "../src/bridge/codex-cdp.mjs";
 
 const UUID = "f6805b8a-332a-43a0-a118-52d3e59542f6";
 
@@ -29,4 +30,40 @@ test("decodes one URL path segment and rejects arbitrary ids", () => {
   );
   assert.throws(() => validateThreadId("arbitrary-thread"), /Invalid/);
   assert.throws(() => decodeThreadPathSegment("%not-encoded"), /encoded/);
+});
+
+test("named Micro actions preserve press and release phases", async () => {
+  const client = new CodexCdpClient();
+  const calls = [];
+  client.dispatchAction = async (...args) => calls.push(args);
+
+  for (const [action, key] of [
+    ["fast", "ACT06"],
+    ["fork", "ACT09"],
+    ["submit", "ACT12"]
+  ]) {
+    await client.dispatchNamedAction(action, true);
+    await client.dispatchNamedAction(action, false);
+    assert.deepEqual(calls.splice(0), [[key, 1], [key, 0]]);
+  }
+});
+
+test("renderer actions execute once on key down", async () => {
+  const client = new CodexCdpClient();
+  const calls = [];
+  client.dispatchRendererAction = async (action) => calls.push(action);
+
+  for (const action of ["pin", "new"]) {
+    await client.dispatchNamedAction(action, true);
+    await client.dispatchNamedAction(action, false);
+  }
+  assert.deepEqual(calls, ["pin", "new"]);
+});
+
+test("unknown bridge actions are rejected", async () => {
+  const client = new CodexCdpClient();
+  await assert.rejects(
+    client.dispatchNamedAction("unknown", true),
+    /Unsupported Codex bridge action/
+  );
 });

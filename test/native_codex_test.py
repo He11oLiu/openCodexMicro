@@ -148,18 +148,34 @@ class NativeCodexTests(unittest.TestCase):
         self.assertTrue(request.full_url.endswith(f"/{thread_id}/click?slot=3"))
         self.assertEqual(opener.open.call_args.kwargs["timeout"], 3.0)
 
-    def test_bridge_mic_dispatch_bypasses_proxy_and_preserves_phase(self):
+    def test_bridge_actions_bypass_proxy_and_preserve_phase(self):
         response = MagicMock()
         response.read.return_value = b'{"ok":true}'
         opener = Mock()
         opener.open.return_value = response
         response.__enter__.return_value = response
         with patch("native_codex.build_opener", return_value=opener) as build:
-            self.assertTrue(dispatch_bridge_action("mic", pressed=False))
+            for action in ("fast", "fork", "mic", "steer", "submit"):
+                self.assertTrue(dispatch_bridge_action(action, pressed=False))
         self.assertEqual(build.call_args.args[0].proxies, {})
-        request = opener.open.call_args.args[0]
-        self.assertEqual(request.method, "POST")
-        self.assertTrue(request.full_url.endswith("/action/mic/up"))
+        requests = [call.args[0] for call in opener.open.call_args_list]
+        self.assertTrue(all(request.method == "POST" for request in requests))
+        self.assertEqual(
+            [request.full_url.rsplit("/action/", 1)[1] for request in requests],
+            [
+                "fast/up",
+                "fork/up",
+                "mic/up",
+                "steer/up",
+                "submit/up",
+            ],
+        )
+
+    def test_one_shot_renderer_action_release_is_a_local_noop(self):
+        with patch("native_codex.build_opener") as opener:
+            self.assertTrue(dispatch_bridge_action("pin", pressed=False))
+            self.assertTrue(dispatch_bridge_action("new", pressed=False))
+        opener.assert_not_called()
 
     def test_bridge_steer_invokes_the_renderer_action(self):
         response = MagicMock()
@@ -219,14 +235,19 @@ class NativeCodexTests(unittest.TestCase):
             adapter.desktop_action("steer")
         fallback.assert_not_called()
 
-    def test_bridge_mode_mic_failure_does_not_duplicate_with_shortcut(self):
+    def test_bridge_mode_failure_does_not_duplicate_one_shot_actions(self):
         adapter = CodexStateAdapter(start=False)
-        with patch(
-            "native_codex.dispatch_bridge_action",
-            return_value=False,
-        ), patch("native_codex.dispatch_desktop_action") as fallback:
-            adapter.desktop_action("mic", pressed=True)
+        with patch("native_codex.dispatch_bridge_action", return_value=False) as bridge, patch(
+            "native_codex.dispatch_desktop_action"
+        ) as fallback:
+            for action in ("fast", "pin", "new", "fork", "submit"):
+                adapter.desktop_action(action, pressed=True)
         fallback.assert_not_called()
+
+        self.assertEqual(
+            [call.args[0] for call in bridge.call_args_list],
+            ["fast", "pin", "new", "fork", "submit"],
+        )
 
     def test_local_fallback_mic_uses_configured_shortcut(self):
         adapter = CodexStateAdapter(start=False)
@@ -237,6 +258,14 @@ class NativeCodexTests(unittest.TestCase):
         ), patch("native_codex.dispatch_desktop_action") as fallback:
             adapter.desktop_action("mic", pressed=True)
         fallback.assert_called_once_with("mic")
+
+    def test_local_fallback_uses_shortcut_only_on_key_down(self):
+        adapter = CodexStateAdapter(start=False)
+        adapter._state["source"] = "native-local"
+        with patch("native_codex.dispatch_desktop_action") as fallback:
+            adapter.desktop_action("fork", pressed=True)
+            adapter.desktop_action("fork", pressed=False)
+        fallback.assert_called_once_with("fork")
 
     def test_submit_uses_cmd_enter_when_configured(self):
         with tempfile.TemporaryDirectory() as directory:

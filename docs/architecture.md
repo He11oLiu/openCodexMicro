@@ -21,6 +21,8 @@ Codex renderer Micro store
           └─ 本机 app-server + rollout/kqueue
 
 任务键 ──> Bridge HTTP ──> Micro event bus（含临时 client thread）
+Fast/Fork/Submit ────────> Micro action down/up
+Pin/New ──> Bridge HTTP ──> renderer 对应语义控件
 Steer ───> Bridge HTTP ──> renderer 真实 Steer action
 Mic ─────> Bridge HTTP ──> Micro ACT10 down/up
 ```
@@ -60,6 +62,12 @@ thread → host/project assignment，因此同一接口可切换本机和 SSH �
 Mic 通过 Micro 的 `ACT10` down/up 事件保留按下/抬起语义。Steer 聚焦当前可见
 composer 并直接点击 renderer 的真实 Steer action；这会复用 Codex 内部的
 本机/远端 host 路由，且不会把失败误退化成普通发送。
+
+Bridge 模式下 Fast、Fork、Submit 同样使用 Micro action 的 down/up 事件。
+Pin 和 New 没有独立的 Micro 固定槽位，因此 Bridge 调用当前 task 的 Pin/Unpin
+按钮和 renderer 的 New chat 按钮。HTTP 超时或 503 后不使用 AppleScript 重放：
+renderer 可能已经执行动作但响应丢失，重放会造成双重 New/Fork/Submit 或反向
+切换。只有 adapter 明确进入 local-only source 后才使用配置快捷键。
 
 普通方式启动 Codex 时没有 9222 endpoint。默认 D200 只显示本机 fallback 任务，
 并使用 `codex://threads/<id>`；远端任务必须通过 Bridge 的 renderer 路由。

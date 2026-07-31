@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Route Fast, Pin, New, Fork, Mic, Steer, and Submit through the renderer
+  Bridge whenever it is the active state source. Fast/Fork/Submit/Mic preserve
+  Micro press/release events; Pin/New invoke their semantic renderer controls.
+- Suppress shortcut replay after uncertain Bridge failures so one-shot actions
+  and toggles cannot execute twice.
+
 ## 0.3.0 — 2026-07-31
 
 ### Fixed
