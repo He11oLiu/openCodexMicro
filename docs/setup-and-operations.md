@@ -176,7 +176,7 @@ If the current Python lacks runtime dependencies:
 | Symptom | Check |
 | --- | --- |
 | D200 is missing or reconnecting | USB cable, port, `d200-error.log`, and `--diagnose` |
-| D200 starts or reconnects but some keys stay stale | Confirm the log shows `uploading full profile`; version 0.3.0 treats every new HID session as an unknown framebuffer |
+| D200 starts or reconnects but some keys stay stale | Confirm the log shows one `uploading full profile`; the current driver treats every new HID session as an unknown framebuffer |
 | Codex Micro says `Not detected` | Launch Codex through `Codex Bridge.app`; inspect the process for `--remote-debugging-port=9222` |
 | Bridge task key does not switch | Check `bridge-error.log` and the sidecar health endpoint |
 | Normal-mode local task does not switch | Check whether Codex handles `codex://threads/<id>` |

@@ -669,7 +669,7 @@ class AppServerClient:
                 "clientInfo": {
                     "name": "open_codex_micro",
                     "title": "openCodexMicro",
-                    "version": "0.3.0",
+                    "version": "0.3.1",
                 },
                 "capabilities": {"experimentalApi": True},
             },
