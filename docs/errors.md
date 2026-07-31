@@ -25,6 +25,16 @@
 
 ## State consistency
 
+- Bridge 模式必须以 renderer Micro store 为唯一权威状态源；D200 不得同时把
+  app-server、rollout、远端 SQLite 再聚合成另一套 Most Recent。
+- Bridge sidecar 每约 500ms 刷新缓存，`/state` 只能读取缓存，不能为每个请求
+  触发 CDP。首次发现后必须缓存 Micro bus、store node、resolver、context 和
+  rate-limit query client；引用失效时才重新扫描资源与 React Fiber。
+- `client-new-thread:<uuid>` 是合法临时键，必须作为一个 URL 编码 path segment
+  贯穿 Python、HTTP 和 CDP；只能额外接受正式 UUID，禁止放宽为任意字符串。
+- Bridge 不可用时默认只能启动 `NativeCodex(enable_remote=False)`。远端 SSH/SQLite
+  monitor 仅允许显式诊断启用；旧 SQLite schema 失败时保留 inventory 并降级为
+  rollout-only，不能清空远端列表。
 - rollout 使用 kqueue 增量读取；禁止恢复 200ms 全量遍历。
 - watcher 重配必须先注册新增 fd、再关闭废弃 fd，并在完成后 catch up；整批关闭两千个 watcher 不但有漏事件窗口，也会拖慢新会话。
 - fork rollout 可能瞬间复制几十 MB 历史。新会话从首行 `session_meta` 识别身份，只解析文件尾部的当前生命周期；禁止为了显示一个键从头解析完整 fork。
@@ -39,10 +49,11 @@
   并记录失败；禁止回退到 Enter 组合键，因为它可能发送或排队。
 - Mic 必须保留 down/up 两个物理阶段并映射到 Micro `ACT10`；不能只在按下时
   模拟一次快捷键。
+- 长生命周期动作 dispatcher 必须逐动作捕获异常。Bridge 503、日志输出失败或
+  单个 action bug 都不能让后续 Send、Steer、Mic 停止消费。
 - Bridge 端口只能绑定 `127.0.0.1`。sidecar 不得监听 LAN，也不得把 CDP
   WebSocket 暴露给非本机来源。
-- 非 Bridge 模式必须明确说明当前回退。SSH 只允许使用 Dock **Recent** 的
-  精确唯一标题回调；标题缺失、重名或不在菜单中必须报错。禁止鼠标坐标点击。
+- 非 Bridge 模式必须明确标记为 local-only；禁止默认建立远端 SSH monitor。
 - inventory/recent 事件先写入 staged logical frame，经过短静默窗口只发布最终 revision；禁止首查和补查各自启动一次 HID 事务。
 - profile 传完不等于画面已经提交。像素摘要、五键 thread 映射和缓存必须在固件激活命令成功后原子切换。
 - 独立 app-server 不会自动订阅 Desktop 已加载线程。approval、input、error 等状态不能只依赖它的线程通知。

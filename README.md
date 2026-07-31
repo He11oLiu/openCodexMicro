@@ -22,9 +22,9 @@ you use most under your fingertips.
 | Codex controls | Fast, Pin, New, Fork, Steer, Mic, and Submit |
 | Usage at a glance | Shows the remaining weekly allowance and refreshes it automatically |
 | Clock and Focus | Keeps the D200 firmware clock and uses it as a Codex focus key |
-| Event-driven integration | Uses Codex app-server, rollout events, persistent SSH, plus an optional loopback-only official-Micro bridge |
+| Renderer-native integration | Uses Codex's own Micro store for local/SSH ordering, status, selection, and routing |
 | Responsive display | Sends only changed keys and keeps input ahead of display transfers |
-| Hot-plug recovery | Reconnects to the D200, restores its last known display, then fully refreshes all keys |
+| HID recovery | On daemon start or USB reconnect, restores cached content when available, then fully refreshes all keys |
 
 ![openCodexMicro flat key layout](docs/images/open-codex-micro-layout.png)
 
@@ -62,11 +62,16 @@ host/project routing. The official Micro page reports the emulated device as
 connected. Steer invokes Codex's real composer action instead of synthesizing
 an Enter shortcut, and Mic sends the official Micro press/release events.
 
-If Codex was launched normally, the first task press explains that Bridge mode
-is inactive. Local tasks use `codex://threads/<id>`; SSH tasks use Codex's
-native Dock **Recent** callback by exact title. The Dock menu can appear
-briefly. This fallback never moves the pointer or depends on screen
-coordinates, but it requires macOS Accessibility permission.
+The Bridge refreshes its cached renderer snapshot every 500ms. Expensive asset
+discovery and React Fiber traversal run only once per renderer lifecycle;
+subsequent snapshots read cached Micro store references. This also preserves
+temporary `client-new-thread:<uuid>` tasks until Codex promotes them to formal
+thread UUIDs.
+
+If Codex was launched normally, openCodexMicro automatically starts a
+local-only app-server/rollout fallback and shows only local tasks. It does not
+open SSH sessions or read remote SQLite by default. `--native-state` retains
+the older local/SSH monitor as an explicit diagnostic mode.
 
 When Bridge mode is unavailable, Mic falls back to the configured
 `realtimeVoice.toggleMicrophoneMute` shortcut. The installer adds

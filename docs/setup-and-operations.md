@@ -1,24 +1,21 @@
 # Setup and Operations
 
-openCodexMicro has one event-driven state pipeline and two automatically
-detected navigation modes:
+openCodexMicro automatically selects one of two state sources:
 
 ```text
-Codex app-server + local kqueue + persistent SSH/inotify
-                         ↓
-             unified local/SSH Most Recent
-                         ↓
-                   Ulanzi D200
+Codex renderer Micro store ──> Bridge cache ──> D200
+              unavailable ──> local app-server/rollout fallback
 ```
 
-| How Codex was launched | Task-key navigation |
+| How Codex was launched | State and task-key navigation |
 | --- | --- |
-| `Codex Bridge.app` | Official Codex Micro event bus through loopback CDP |
-| Normal Codex app | Local `codex://` links; SSH Dock **Recent** callback |
+| `Codex Bridge.app` | Renderer Micro store plus official Micro event bus |
+| Normal Codex app | Local-only app-server/rollout state plus `codex://` links |
 
-No daemon setting selects the mode. The sidecar checks whether the current
-Codex process exposes the loopback bridge. Otherwise openCodexMicro
-automatically uses the normal fallback and explains that once on first use.
+No daemon setting selects the mode. Bridge state includes local and Codex SSH
+tasks, Most Recent order, status, selection, and host routing. When it is
+unavailable, openCodexMicro starts `NativeCodex(enable_remote=False)` and does
+not connect to SSH hosts or read their SQLite databases.
 
 ## Dependencies
 
@@ -95,9 +92,9 @@ wrapper displays an error explaining that task keys will use normal fallback.
 Finder does not provide persistent per-app launch arguments; this wrapper is
 the supported double-click launcher.
 
-Opening the original Codex icon remains valid. In that case the first task
-press displays a one-time explanation, local tasks use deep links, and SSH
-tasks use the Dock Recent callback. The Dock menu may be visible briefly.
+Opening the original Codex icon remains valid. In that case only local tasks
+are displayed and task keys use deep links. Launch through Bridge to display
+and navigate remote tasks.
 
 CDP binds to `127.0.0.1:9222` and the sidecar to `127.0.0.1:17373`; neither is
 reachable from the LAN.
@@ -158,12 +155,15 @@ python3 standalone/d200.py --self-test
 # Read one Codex state snapshot without opening the D200.
 python3 standalone/d200.py --state
 
+# Explicit legacy local/SSH diagnostic (may open SSH monitors).
+python3 standalone/d200.py --native-state
+
 # Identify the HID interface without writing to it.
 python3 standalone/d200.py --diagnose
 
 # Bridge sidecar and current Codex connection.
 curl http://127.0.0.1:17373/health
-curl 'http://127.0.0.1:17373/state?refresh=1'
+curl http://127.0.0.1:17373/state
 ```
 
 If the current Python lacks runtime dependencies:
@@ -176,11 +176,11 @@ If the current Python lacks runtime dependencies:
 | Symptom | Check |
 | --- | --- |
 | D200 is missing or reconnecting | USB cable, port, `d200-error.log`, and `--diagnose` |
-| D200 reconnects but some keys stay stale | Confirm the log shows `uploading full profile`; version 0.2.1 forgets all per-key digests after a real USB loss |
+| D200 starts or reconnects but some keys stay stale | Confirm the log shows `uploading full profile`; version 0.3.0 treats every new HID session as an unknown framebuffer |
 | Codex Micro says `Not detected` | Launch Codex through `Codex Bridge.app`; inspect the process for `--remote-debugging-port=9222` |
 | Bridge task key does not switch | Check `bridge-error.log` and the sidecar health endpoint |
 | Normal-mode local task does not switch | Check whether Codex handles `codex://threads/<id>` |
-| Normal-mode SSH task does not switch | Grant Accessibility and confirm the exact title appears once in Dock Recent |
+| Remote task is missing | Launch through `Codex Bridge.app`; normal mode intentionally shows local tasks only |
 | Steer does nothing | Launch through `Codex Bridge.app`, check bridge health, and confirm a running task exposes the composer Steer action |
 | Mic does nothing | In Bridge mode check bridge health; otherwise verify `realtimeVoice.toggleMicrophoneMute` in `~/.codex/keybindings.json` |
 | Pin or New does nothing | Verify Accessibility and the shortcut directly in Codex |
@@ -225,7 +225,7 @@ npm run check
 Main entry points:
 
 - `standalone/d200.py`: HID, profiles, input path, and display queue;
-- `standalone/native_codex.py`: local/SSH state, Usage, navigation, and shortcuts;
+- `standalone/native_codex.py`: Bridge-first adapter, local fallback, explicit legacy SSH diagnostics, navigation, and shortcuts;
 - `src/bridge/`: official Codex Micro renderer bridge;
 - `scripts/build-bridge.mjs`: bundle the loopback sidecar;
 - `scripts/install.mjs`: installation, wrapper packaging, and migration;

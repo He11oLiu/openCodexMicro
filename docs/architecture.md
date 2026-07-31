@@ -1,37 +1,48 @@
 # Architecture
 
-openCodexMicro 的状态链路始终是事件驱动的 native 集成；任务导航额外提供可选的
-loopback-only Codex Micro bridge。
+openCodexMicro 默认直接消费 Codex renderer 已聚合的 Micro store；native
+app-server/rollout 只在 Bridge 不可用时提供 local-only fallback。
 
 ## Codex state
 
 ```text
-本机 app-server ── inventory / usage ───────────┐
-本机 rollout ── kqueue 增量 ───────────────────┤
-Codex 全局状态 ── kqueue ── host/thread 映射 ─┤
-远端 rollout/SQLite ── SSH + inotify 增量 ────┼─> 统一 Most Recent ──> D200
-                                                │
-任务键 ──> bridge sidecar ── CDP ── Micro bus ─┤
-      └─> 本机 deep link / SSH Dock Recent 回退 ┘
-                                                │
-                                                v
-                                  openCodexMicro state
-                                                │
-                                                v
-                                        D200 profile queue
-                                                │
-                                                v
-                                            USB HID
+Codex renderer Micro store
+  ├─ 本机与多个 SSH host 的任务
+  ├─ Most Recent / status / selected
+  └─ thread → project / host assignment
+                    │
+             CDP cached snapshot (500ms)
+                    │
+             CodexStateAdapter ──────────────> D200 profile queue ──> USB HID
+                    │
+          Bridge 不可用（连续三次）
+                    v
+       NativeCodex(enable_remote=False)
+          └─ 本机 app-server + rollout/kqueue
+
+任务键 ──> Bridge HTTP ──> Micro event bus（含临时 client thread）
+Steer ───> Bridge HTTP ──> renderer 真实 Steer action
+Mic ─────> Bridge HTTP ──> Micro ACT10 down/up
 ```
 
-`NativeCodex` 用 app-server 获取本机初始 inventory 和 Usage，用 macOS kqueue 监听本机 rollout 与 Codex 全局状态。全局状态发现 Codex App 管理的 SSH host、project 和 thread assignment；每台活动主机只维持一条 SSH 长连接。远端 helper 用 SQLite 做连接时 inventory/事件对账，用 Linux inotify 把 rollout 的字节增量推回本机，不做 SSH 目录轮询或每秒 `thread/list`。
+`CodexStateAdapter` 每 250ms 读取 sidecar 的内存缓存；sidecar 每 500ms 通过
+CDP 更新一次。`/state` 本身不执行 CDP，因此 D200 polling 不会放大 renderer
+负载。首次 snapshot 扫描 JS assets 与 React Fiber，定位 Micro bus、store node、
+resolver、context map 和 rate-limit query clients，并保存到 renderer 的
+`Symbol.for("codex-keyboard-micro-snapshot-source")`。后续 snapshot 直接读这些
+引用；root 或 store 引用失效时才清除缓存并重新发现。本机实测热读取约
+0.2–1.2ms。
 
-本机和远端 rollout 复用同一个 lifecycle 解析器。新用户 rollout 从 `session_meta` 直接识别，过滤 subagent，并只解析文件尾部的当前生命周期。远端断线时保留最后状态并标记 `hostOnline=false`，重连后重新发送 inventory 和文件尾增量，不把掉线误报成任务失败。
+Micro store 自己负责本机/远端统一排序、状态与 host assignment。D200 只取前五
+个 slot，不再建立第二套 SSH/SQLite 聚合。slot 的 `client-new-thread:<uuid>`
+临时键会原样经过 Bridge；Codex 晋升为正式 conversation UUID 后，下一个 snapshot
+原子替换 D200 映射。
 
-recent/结构事件先进入 staged logical framebuffer，在 50ms 静默窗口内合并 order 与 status，然后只提交一个 revision。后台任务重新启动也从已监听 rollout 直接晋升；`thread/list` 退到事件触发的补齐和对账路径。所有 host 按最近活动时间统一排序，对齐 Codex Micro 默认 Most Recent 模式。Usage 每十分钟有独立的硬期限；rate-limit 通知只能提前刷新。
-
-五个任务键保持独立的全局 Most Recent 顺序；统一排序发生在截断五槽之前，
-所以五个更近的本机任务会自然挤掉更旧的 SSH 任务，反之亦然。
+Bridge 连续三次不可用后，adapter 才创建 `NativeCodex(enable_remote=False)`。
+fallback 使用本机 app-server inventory、rollout/kqueue lifecycle 与本机 deep
+link，不创建 SSH 进程。Bridge 恢复后立即关闭 fallback。旧的远端 monitor 仍可
+用 `--native-state` 显式诊断；远端 SQLite schema 不兼容时保留上一 inventory，
+记录 host error，并扫描 rollout 降级运行。
 
 `Codex Bridge.app` 用三个参数启动真实 Codex：
 
@@ -50,10 +61,8 @@ Mic 通过 Micro 的 `ACT10` down/up 事件保留按下/抬起语义。Steer 聚
 composer 并直接点击 renderer 的真实 Steer action；这会复用 Codex 内部的
 本机/远端 host 路由，且不会把失败误退化成普通发送。
 
-普通方式启动 Codex 时没有 9222 endpoint。任务键会在当前 daemon 生命周期内
-弹一次说明；本机任务使用 `codex://threads/<id>`，SSH 任务使用 Dock **Recent**
-菜单中精确且唯一的标题回调。SSH 回退依赖 Accessibility，并可能短暂显示 Dock
-菜单；标题缺失或重名时必须拒绝，不能猜测坐标。
+普通方式启动 Codex 时没有 9222 endpoint。默认 D200 只显示本机 fallback 任务，
+并使用 `codex://threads/<id>`；远端任务必须通过 Bridge 的 renderer 路由。
 
 ## D200 input and output
 

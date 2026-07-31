@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import WebSocket from "ws";
+import { localThreadKey } from "./thread-key.mjs";
 
 const execFileAsync = promisify(execFile);
 const USAGE_REFRESH_MS = Math.max(
@@ -58,72 +59,112 @@ const ENABLE_EXPRESSION = `(async () => {
 })()`;
 
 const SNAPSHOT_EXPRESSION = `(async () => {
-  const urls = [...new Set([
-    ...[...document.querySelectorAll("link[href],script[src]")].map((el) => el.href || el.src),
-    ...performance.getEntriesByType("resource").map((entry) => entry.name)
-  ])].filter((url) => url.includes("/assets/") && url.endsWith(".js"));
-  const slotSignalsUrl = urls.find((url) => url.includes("/assets/codex-micro-slot-signals-"));
-  if (!slotSignalsUrl) throw new Error("Codex Micro slot signals are not loaded");
-
-  const namespaces = [];
-  for (const url of urls) {
-    try { namespaces.push(await import(url)); } catch {}
-  }
-  const exportedValues = namespaces.flatMap((namespace) => Object.values(namespace));
-  const bus = exportedValues.find((candidate) =>
-    candidate && typeof candidate === "object" && candidate.handlers instanceof Map &&
-    (typeof candidate.dispatchHostMessage === "function" || typeof candidate.dispatchMessage === "function")
-  );
-  if (bus && (bus.handlers.get("codex-micro-hid-event")?.size ?? 0) === 0) {
-    globalThis[Symbol.for("codex-keyboard-micro-bus")] = bus;
-    (bus.dispatchHostMessage ?? bus.dispatchMessage).call(bus, ${JSON.stringify(DEVICE_STATE)});
-  } else if (bus) {
-    globalThis[Symbol.for("codex-keyboard-micro-bus")] = bus;
-  }
-
+  const startedAt = performance.now();
   const root = document.getElementById("root");
   const reactKey = root && Object.getOwnPropertyNames(root).find((key) => key.startsWith("__reactContainer$"));
   if (!root || !reactKey) throw new Error("Codex React root was not found");
-  const signals = await import(slotSignalsUrl);
-  const resolvers = Object.values(signals).filter((candidate) =>
-    candidate && typeof candidate === "object" &&
-    typeof candidate.resolve === "function" && typeof candidate.createSubscriberAtom === "function"
-  );
-  let queue = [root[reactKey]];
-  const seen = new Set();
-  const queryClients = new Set();
+  const sourceKey = Symbol.for("codex-keyboard-micro-snapshot-source");
+  const validSlots = (slots) =>
+    Array.isArray(slots) && slots.length === 6 &&
+    slots.every((slot, index) => slot?.id === index);
+  const readSource = (source) => {
+    if (!source || source.root !== root || !source.node?.store) {
+      throw new Error("Cached Codex Micro source is stale");
+    }
+    const slots = source.node.store.get(
+      source.resolver.resolve(source.node, source.contextMap)
+    );
+    if (!validSlots(slots)) throw new Error("Cached Codex Micro slots are stale");
+    return slots;
+  };
+
+  let source = globalThis[sourceKey];
   let found = null;
-  while (queue.length && seen.size < 30000 && !found) {
-    const fiber = queue.pop();
-    if (!fiber || seen.has(fiber)) continue;
-    seen.add(fiber);
-    const values = [fiber.memoizedProps?.value];
-    let dependency = fiber.dependencies?.firstContext;
-    while (dependency) { values.push(dependency.memoizedValue); dependency = dependency.next; }
-    for (const value of values) {
-      if (
-        value && typeof value.getQueryCache === "function" &&
-        typeof value.getQueryData === "function"
-      ) queryClients.add(value);
-      if (!(value instanceof Map)) continue;
-      for (const node of value.values()) {
-        if (!node?.store || typeof node.store.get !== "function") continue;
-        for (const resolver of resolvers) {
-          try {
-            const slots = node.store.get(resolver.resolve(node, value));
-            if (Array.isArray(slots) && slots.length === 6 && slots.every((slot, index) => slot?.id === index)) {
-              found = slots;
-              break;
-            }
-          } catch {}
+  let queryClients = new Set();
+  let cacheHit = false;
+  if (source) {
+    try {
+      found = readSource(source);
+      queryClients = new Set(source.queryClients ?? []);
+      cacheHit = true;
+    } catch {
+      delete globalThis[sourceKey];
+      source = null;
+    }
+  }
+
+  if (!found) {
+    const urls = [...new Set([
+      ...[...document.querySelectorAll("link[href],script[src]")].map((el) => el.href || el.src),
+      ...performance.getEntriesByType("resource").map((entry) => entry.name)
+    ])].filter((url) => url.includes("/assets/") && url.endsWith(".js"));
+    const slotSignalsUrl = urls.find((url) => url.includes("/assets/codex-micro-slot-signals-"));
+    if (!slotSignalsUrl) throw new Error("Codex Micro slot signals are not loaded");
+
+    const namespaces = [];
+    for (const url of urls) {
+      try { namespaces.push(await import(url)); } catch {}
+    }
+    const exportedValues = namespaces.flatMap((namespace) => Object.values(namespace));
+    const bus = exportedValues.find((candidate) =>
+      candidate && typeof candidate === "object" && candidate.handlers instanceof Map &&
+      (typeof candidate.dispatchHostMessage === "function" || typeof candidate.dispatchMessage === "function")
+    );
+    if (bus) {
+      globalThis[Symbol.for("codex-keyboard-micro-bus")] = bus;
+      if ((bus.handlers.get("codex-micro-hid-event")?.size ?? 0) === 0) {
+        (bus.dispatchHostMessage ?? bus.dispatchMessage).call(bus, ${JSON.stringify(DEVICE_STATE)});
+      }
+    }
+
+    const signals = await import(slotSignalsUrl);
+    const resolvers = Object.values(signals).filter((candidate) =>
+      candidate && typeof candidate === "object" &&
+      typeof candidate.resolve === "function" && typeof candidate.createSubscriberAtom === "function"
+    );
+    const queue = [root[reactKey]];
+    const seen = new Set();
+    queryClients = new Set();
+    while (queue.length && seen.size < 30000 && !found) {
+      const fiber = queue.pop();
+      if (!fiber || seen.has(fiber)) continue;
+      seen.add(fiber);
+      const values = [fiber.memoizedProps?.value];
+      let dependency = fiber.dependencies?.firstContext;
+      while (dependency) { values.push(dependency.memoizedValue); dependency = dependency.next; }
+      for (const value of values) {
+        if (
+          value && typeof value.getQueryCache === "function" &&
+          typeof value.getQueryData === "function"
+        ) queryClients.add(value);
+        if (!(value instanceof Map)) continue;
+        for (const node of value.values()) {
+          if (!node?.store || typeof node.store.get !== "function") continue;
+          for (const resolver of resolvers) {
+            try {
+              const slots = node.store.get(resolver.resolve(node, value));
+              if (validSlots(slots)) {
+                found = slots;
+                source = {
+                  root,
+                  node,
+                  resolver,
+                  contextMap: value,
+                  queryClients: [...queryClients]
+                };
+                globalThis[sourceKey] = source;
+                break;
+              }
+            } catch {}
+          }
+          if (found) break;
         }
         if (found) break;
       }
-      if (found) break;
+      queue.push(fiber.child, fiber.sibling);
     }
-    queue.push(fiber.child, fiber.sibling);
+    if (!found) throw new Error("Codex Micro slot store was not found");
   }
-  if (!found) throw new Error("Codex Micro slot store was not found");
   let usage = null;
   for (const queryClient of queryClients) {
     try {
@@ -190,7 +231,11 @@ const SNAPSHOT_EXPRESSION = `(async () => {
         activeThreadKey && normalizeThreadKey(slot.threadKey) === normalizeThreadKey(activeThreadKey)
       )
     })),
-    usage
+    usage,
+    bridgeSnapshot: {
+      source: cacheHit ? "cache" : "discovery",
+      durationMs: performance.now() - startedAt
+    }
   };
 })()`;
 
@@ -268,12 +313,8 @@ export class CodexCdpClient {
   }
 
   async clickThread(threadId, slot = 0) {
-    const normalized = String(threadId ?? "").replace(/^local:/, "");
-    if (!/^[0-9a-f-]{36}$/i.test(normalized)) {
-      throw new Error("Invalid Codex thread id");
-    }
     await this.connect();
-    return this.clickThreadKey(`local:${normalized}`, slot);
+    return this.clickThreadKey(localThreadKey(threadId), slot);
   }
 
   async clickThreadKey(threadKey, slot) {

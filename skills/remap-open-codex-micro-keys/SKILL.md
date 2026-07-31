@@ -60,5 +60,8 @@ layout tests before editing.
 5. Remind the user that simulated shortcuts require Accessibility and
    `System Events` Automation permission.
 
-Preserve automatic navigation selection: official Micro event bus when Codex
-was launched through `Codex Bridge.app`, native fallback otherwise.
+Preserve automatic state/navigation selection: renderer Micro store and event
+bus when Codex was launched through `Codex Bridge.app`, local-only native
+fallback otherwise. Keep Mic as `ACT10` down/up and Steer as the renderer's
+real Steer action; current Codex treats `ACT10_ACT11` as one Mic slot and does
+not expose `ACT11` as an independent action.
