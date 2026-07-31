@@ -13,6 +13,8 @@ import { dirname, join, resolve } from "node:path";
 
 const home = homedir();
 const uid = process.getuid();
+const packageMetadata = JSON.parse(await readFile(resolve("package.json"), "utf8"));
+const releaseVersion = String(packageMetadata.version);
 const startDaemon = !process.argv.includes("--no-start");
 const appRoot = join(home, "Library", "Application Support", "openCodexMicro");
 const userApplications = join(home, "Applications");
@@ -210,8 +212,8 @@ const bridgeInfo = `<?xml version="1.0" encoding="UTF-8"?>
   <key>CFBundleIdentifier</key><string>io.opencodexmicro.bridge</string>
   <key>CFBundleName</key><string>Codex Bridge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.2.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>${xml(releaseVersion)}</string>
+  <key>CFBundleVersion</key><string>${xml(releaseVersion)}</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>

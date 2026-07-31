@@ -22,6 +22,7 @@ import resource
 import select
 import shlex
 import subprocess
+import sys
 import threading
 import time
 import tomllib
@@ -71,6 +72,13 @@ ROLLOUT_NAME = re.compile(
     r"rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$"
 )
+THREAD_UUID_PATTERN = (
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+THREAD_KEY = re.compile(
+    rf"(?:{THREAD_UUID_PATTERN}|client-new-thread:{THREAD_UUID_PATTERN})"
+)
 
 REMOTE_WATCH_SCRIPT = r'''
 from __future__ import print_function
@@ -97,6 +105,7 @@ if fd < 0:
 mask = 0x00000002 | 0x00000008 | 0x00000080 | 0x00000100 | 0x00000400
 watches = {}
 last_inventory = None
+inventory_failed = False
 LIFECYCLE_MARKERS = (
     b'"type":"task_started"',
     b'"type":"task_complete"',
@@ -111,7 +120,7 @@ def emit(value):
     sys.stdout.flush()
 
 def inventory():
-    global last_inventory
+    global inventory_failed, last_inventory
     try:
         connection = sqlite3.connect(
             "file:" + database + "?mode=ro", uri=True, timeout=1
@@ -130,9 +139,16 @@ def inventory():
             """
         ).fetchall()
         connection.close()
+        inventory_failed = False
     except Exception as error:
-        emit({"type": "warning", "message": str(error)})
-        return []
+        inventory_failed = True
+        emit({
+            "type": "warning",
+            "message": str(error),
+            "sqliteVersion": sqlite3.sqlite_version,
+            "mode": "rollout-only",
+        })
+        return last_inventory or []
     threads = []
     for row in rows:
         threads.append({
@@ -212,6 +228,20 @@ threads = inventory()
 for thread in threads:
     path = thread.get("path")
     if path:
+        send_delta(path, initial=True)
+if inventory_failed:
+    recent_rollouts = []
+    for current, _directories, files in os.walk(sessions):
+        for name in files:
+            if not name.startswith("rollout-") or not name.endswith(".jsonl"):
+                continue
+            path = os.path.join(current, name)
+            try:
+                recent_rollouts.append((os.path.getmtime(path), path))
+            except OSError:
+                pass
+    recent_rollouts.sort(reverse=True)
+    for _modified, path in recent_rollouts[:2048]:
         send_delta(path, initial=True)
 emit({"type": "online"})
 
@@ -459,7 +489,7 @@ def dispatch_bridge_thread(
 ) -> bool:
     """Send a task key through the optional official-Micro renderer bridge."""
     normalized = str(thread_id).removeprefix("local:")
-    if not re.fullmatch(r"[0-9a-fA-F-]{36}", normalized):
+    if not THREAD_KEY.fullmatch(normalized):
         return False
     url = (
         f"{bridge_url}/thread/{quote(normalized, safe='')}/click"
@@ -572,7 +602,7 @@ end run
 def show_native_navigation_notice() -> None:
     """Explain why native fallback was used instead of the fast bridge."""
     script = '''
-display alert "Codex Bridge is not active" message "This Codex instance was not started by Codex Bridge. Local task keys use codex:// links and SSH task keys use Codex's Dock Recent menu. For direct, faster host-aware switching, quit Codex and open Codex Bridge.app from ~/Applications." as informational
+display alert "Codex Bridge is not active" message "This Codex instance was not started by Codex Bridge. Local task keys use codex:// links; remote and temporary task keys require Codex Bridge. For direct, host-aware switching, quit Codex and open Codex Bridge.app from ~/Applications." as informational
 '''
     subprocess.Popen(
         ["/usr/bin/osascript", "-e", script],
@@ -630,7 +660,7 @@ class AppServerClient:
                 "clientInfo": {
                     "name": "open_codex_micro",
                     "title": "openCodexMicro",
-                    "version": "0.2.0",
+                    "version": "0.3.0",
                 },
                 "capabilities": {"experimentalApi": True},
             },
@@ -1317,13 +1347,14 @@ def usage_windows(response: dict | None) -> list[dict]:
 
 
 class NativeCodex:
-    """Thread-safe, event-driven state source for the D200 runtime."""
+    """Local state source; remote SSH monitoring is an explicit diagnostic."""
 
-    def __init__(self, start: bool = True):
+    def __init__(self, start: bool = True, enable_remote: bool = False):
         self._lock = threading.RLock()
         self._changed = threading.Condition(self._lock)
         self._revision = 0
         self._stopped = threading.Event()
+        self._enable_remote = enable_remote
         self._events: queue.Queue[tuple] = queue.Queue()
         self._client: AppServerClient | None = None
         self._native_navigation_notice_shown = False
@@ -1331,6 +1362,7 @@ class NativeCodex:
         self._global_state_watcher: GlobalStateWatcher | None = None
         self._remote_monitors: dict[str, RemoteHostMonitor] = {}
         self._remote_online: dict[str, bool] = {}
+        self._remote_errors: dict[str, str] = {}
         self._thread_assignments: dict[str, dict] = {}
         self._local_threads: list[dict] = []
         self._remote_threads: dict[str, list[dict]] = {}
@@ -1424,6 +1456,22 @@ class NativeCodex:
         )[:SLOT_COUNT]
 
     def _sync_remote_hosts(self) -> bool:
+        if not self._enable_remote:
+            changed = bool(
+                self._remote_monitors
+                or self._remote_threads
+            )
+            assignments = thread_assignments()
+            changed = assignments != self._thread_assignments or changed
+            self._thread_assignments = assignments
+            for monitor in tuple(self._remote_monitors.values()):
+                monitor.close()
+            self._remote_monitors.clear()
+            self._remote_online.clear()
+            self._remote_errors.clear()
+            self._remote_threads.clear()
+            self._merge_threads()
+            return changed
         assignments = thread_assignments()
         hosts = remote_hosts_from_state()
         changed = assignments != self._thread_assignments
@@ -1433,6 +1481,7 @@ class NativeCodex:
                 continue
             self._remote_monitors.pop(host_id).close()
             self._remote_online.pop(host_id, None)
+            self._remote_errors.pop(host_id, None)
             self._remote_threads.pop(host_id, None)
             for key, thread in tuple(self._all_threads_by_path.items()):
                 if thread.get("hostId") == host_id:
@@ -1775,6 +1824,7 @@ class NativeCodex:
                         if host_id == "local"
                         else self._remote_online.get(host_id, False)
                     ),
+                    "hostError": self._remote_errors.get(host_id),
                 }
             )
         with self._lock:
@@ -1953,9 +2003,23 @@ class NativeCodex:
             return changed
         was_online = self._remote_online.get(host_id, False)
         self._remote_online[host_id] = True
+        if event_type == "warning":
+            message = str(event.get("message") or "Remote state warning")
+            previous = self._remote_errors.get(host_id)
+            self._remote_errors[host_id] = message
+            if not was_online or previous != message:
+                print(
+                    f"Codex remote {host_id} degraded to "
+                    f"{event.get('mode') or 'limited'} state "
+                    f"(SQLite {event.get('sqliteVersion') or 'unknown'}): {message}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            return not was_online or previous != message
         if event_type == "online":
             return not was_online
         if event_type == "inventory":
+            self._remote_errors.pop(host_id, None)
             before = self._inventory_signature()
             threads = []
             active_keys = set()
@@ -2327,9 +2391,17 @@ class NativeCodex:
         if dispatch_bridge_thread(thread_id, slot_index):
             self._mark_thread_opened(thread_id, host_id)
             return
+        normalized = str(thread_id).removeprefix("local:")
+        if normalized.startswith("client-new-thread:"):
+            raise RuntimeError(
+                "Temporary Codex task requires an active Codex Bridge"
+            )
         if host_id == "local":
             subprocess.Popen(
-                ["/usr/bin/open", f"codex://threads/{quote(thread_id, safe='')}"],
+                [
+                    "/usr/bin/open",
+                    f"codex://threads/{quote(normalized, safe='')}",
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -2401,3 +2473,212 @@ class NativeCodex:
             self._client.close()
         if self._monitor is not None:
             self._monitor.join(timeout=2)
+
+
+def fetch_bridge_state(
+    bridge_url: str = BRIDGE_URL,
+    timeout: float = 0.6,
+) -> dict:
+    """Read the sidecar's already-refreshed renderer cache."""
+    request = Request(f"{bridge_url}/state", method="GET")
+    with build_opener(ProxyHandler({})).open(request, timeout=timeout) as response:
+        payload = json.loads(response.read())
+    if not isinstance(payload, dict):
+        raise ValueError("Codex bridge returned a non-object state")
+    return payload
+
+
+class CodexStateAdapter:
+    """Prefer renderer Micro state and fall back to local-only NativeCodex."""
+
+    POLL_SECONDS = 0.250
+    FALLBACK_AFTER_FAILURES = 3
+
+    def __init__(
+        self,
+        start: bool = True,
+        bridge_url: str = BRIDGE_URL,
+    ):
+        self._bridge_url = bridge_url
+        self._lock = threading.RLock()
+        self._changed = threading.Condition(self._lock)
+        self._revision = 0
+        self._stopped = threading.Event()
+        self._fallback: NativeCodex | None = None
+        self._bridge_failures = 0
+        self._announced_source: str | None = None
+        self._state = {
+            "connected": False,
+            "source": "bridge",
+            "slots": [],
+            "usage": {"windows": []},
+            "error": "Waiting for Codex Bridge",
+            "updatedAt": int(time.time() * 1000),
+        }
+        self._monitor: threading.Thread | None = None
+        if start:
+            self._monitor = threading.Thread(
+                target=self._run,
+                name="codex-state-adapter",
+                daemon=True,
+            )
+            self._monitor.start()
+
+    @staticmethod
+    def _bridge_frame(payload: dict) -> dict:
+        slots = []
+        for index, raw in enumerate((payload.get("slots") or [])[:SLOT_COUNT]):
+            if not isinstance(raw, dict) or not raw.get("threadKey"):
+                continue
+            slots.append({
+                "id": index,
+                "threadKey": str(raw["threadKey"]),
+                "title": str(raw.get("title") or "Untitled"),
+                "status": str(raw.get("status") or "idle"),
+                "hostId": str(raw.get("hostId") or "renderer"),
+                "selected": bool(raw.get("selected")),
+            })
+        usage = payload.get("usage")
+        return {
+            "connected": True,
+            "source": "bridge",
+            "slots": slots,
+            "usage": usage if isinstance(usage, dict) else {"windows": []},
+            "error": None,
+            "updatedAt": int(payload.get("updatedAt") or time.time() * 1000),
+        }
+
+    def _publish(self, state: dict) -> bool:
+        compared = ("connected", "source", "slots", "usage", "error")
+        with self._changed:
+            if all(self._state.get(key) == state.get(key) for key in compared):
+                return False
+            self._state = deepcopy(state)
+            self._revision += 1
+            self._changed.notify_all()
+        source = str(state.get("source") or "unknown")
+        if self._announced_source != source:
+            print(
+                f"Codex state source switched to {source}.",
+                flush=True,
+            )
+            self._announced_source = source
+        return True
+
+    def _close_fallback(self) -> None:
+        fallback = self._fallback
+        self._fallback = None
+        if fallback is not None:
+            fallback.close()
+
+    def _poll_once(self) -> None:
+        error = None
+        try:
+            payload = fetch_bridge_state(self._bridge_url)
+            if not payload.get("connected"):
+                raise RuntimeError(str(payload.get("error") or "Bridge disconnected"))
+            self._bridge_failures = 0
+            self._publish(self._bridge_frame(payload))
+            self._close_fallback()
+            return
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            OSError,
+            RuntimeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ) as caught:
+            error = caught
+            self._bridge_failures += 1
+
+        with self._lock:
+            bridge_is_active = self._state.get("source") == "bridge"
+        if bridge_is_active and self._bridge_failures < self.FALLBACK_AFTER_FAILURES:
+            return
+        if self._fallback is None:
+            self._fallback = NativeCodex(enable_remote=False)
+        state = self._fallback.snapshot()
+        state["source"] = "native-local"
+        if not state.get("connected") and not state.get("error"):
+            state["error"] = str(error or "Codex Bridge unavailable")
+        self._publish(state)
+
+    def _run(self) -> None:
+        while not self._stopped.is_set():
+            self._poll_once()
+            self._stopped.wait(self.POLL_SECONDS)
+
+    def snapshot(self, _force: bool = False) -> dict:
+        with self._lock:
+            return deepcopy(self._state)
+
+    def wait_for_change(
+        self,
+        revision: int,
+        timeout: float | None = None,
+    ) -> tuple[int, dict]:
+        with self._changed:
+            self._changed.wait_for(
+                lambda: self._revision != revision or self._stopped.is_set(),
+                timeout=timeout,
+            )
+            return self._revision, deepcopy(self._state)
+
+    def open_thread(
+        self,
+        thread_id: str,
+        host_id: str | None = None,
+        title: str = "",
+    ) -> None:
+        slot_index = next(
+            (
+                index
+                for index, slot in enumerate(self.snapshot().get("slots") or [])
+                if str(slot.get("threadKey") or "") == str(thread_id)
+            ),
+            0,
+        )
+        if dispatch_bridge_thread(
+            thread_id,
+            slot_index,
+            bridge_url=self._bridge_url,
+        ):
+            return
+        normalized = str(thread_id).removeprefix("local:")
+        if re.fullmatch(THREAD_UUID_PATTERN, normalized):
+            subprocess.Popen(
+                ["/usr/bin/open", f"codex://threads/{quote(normalized, safe='')}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        print(
+            f"Temporary Codex task cannot open while Bridge is unavailable: {normalized}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    def desktop_action(self, action: str, pressed: bool = True) -> None:
+        if action in {"mic", "steer"}:
+            if dispatch_bridge_action(
+                action,
+                pressed,
+                bridge_url=self._bridge_url,
+            ):
+                return
+            with self._lock:
+                bridge_mode = self._state.get("source") == "bridge"
+            if action == "steer" or bridge_mode or not pressed:
+                return
+        dispatch_desktop_action(action)
+
+    def close(self) -> None:
+        self._stopped.set()
+        with self._changed:
+            self._changed.notify_all()
+        if self._monitor is not None:
+            self._monitor.join(timeout=2)
+        self._close_fallback()

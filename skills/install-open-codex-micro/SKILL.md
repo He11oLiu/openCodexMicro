@@ -72,6 +72,9 @@ and `standalone/d200.py` are not there, ask for the openCodexMicro checkout.
    `io.opencodexmicro.d200`, and only its current plist. Treat a missing D200 as
    a device/USB issue, not a failed daemon install. A slow HID write warning
    alone does not indicate a duplicate daemon.
+   When Bridge is healthy, confirm `/state` reports renderer slots and the D200
+   log reports `source` as `bridge`; normal Codex launch should report the
+   `native-local` fallback and must not start SSH monitors.
 9. If daemon start was declined, verify that the managed job is not running.
 10. Report whether shortcuts changed, whether the daemon started, its single
     PID, which permissions still need user action, and the verification result.

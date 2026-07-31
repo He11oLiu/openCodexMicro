@@ -131,10 +131,44 @@ def display_baseline_after_connect(
     runtime_digest: str,
     cached_key_digests: dict[int, str],
 ) -> tuple[str, dict[int, str]]:
-    """Forget every applied key after a USB loss, but not a daemon restart."""
-    if profile_restore_required:
-        return "", {}
-    return runtime_digest, cached_key_digests.copy()
+    """Treat every new HID session as requiring one complete framebuffer."""
+    # The D200 exposes no readable framebuffer generation. A disk digest only
+    # describes the last successful upload; it cannot prove that the currently
+    # attached/powered display still contains it. Reusing that digest can turn
+    # the first update into a partial profile and leave every unchanged key
+    # blank. The cached archive may still be replayed first after USB loss, but
+    # the current renderer state must always follow as a complete profile.
+    return "", {}
+
+
+def dispatch_surface_action(
+    native_adapter: object,
+    index: int,
+    pressed: bool,
+) -> bool:
+    """Dispatch one non-agent key without letting it kill the action worker."""
+    try:
+        if index in ACTION_KEYS:
+            action = ACTION_KEYS[index]
+            if action in {"mic", "steer"}:
+                native_adapter.desktop_action(action, pressed=pressed)
+            elif pressed:
+                native_adapter.desktop_action(action)
+        elif pressed and index in {USAGE_DISPLAY_KEY, FOCUS_KEY}:
+            native_adapter.desktop_action("focus")
+        return True
+    except Exception as error:
+        phase = "down" if pressed else "up"
+        log_dispatch_error(f"Codex action {index} {phase} failed: {error}")
+        return False
+
+
+def log_dispatch_error(message: str) -> None:
+    """Best-effort logging must never terminate the long-lived dispatcher."""
+    try:
+        print(message, file=sys.stderr, flush=True)
+    except Exception:
+        pass
 
 
 def normalize_status(value: object) -> str:
@@ -778,9 +812,9 @@ def run(
     last_connection_error = ""
     last_connection_log_at = 0.0
     runtime_applied_digest = "" if force_profile else load_cached_digest()
-    from native_codex import NativeCodex
+    from native_codex import CodexStateAdapter
 
-    native_adapter = NativeCodex()
+    native_adapter = CodexStateAdapter()
     while not stopped:
         device = None
         session_stop = threading.Event()
@@ -793,8 +827,7 @@ def run(
         try:
             device = D200()
             cached_profile = load_cached_profile()
-            # A normal daemon restart leaves the D200's last screen intact.
-            # A reconnect after an actual USB loss does not, so replay the last
+            # A reconnect after an observed USB loss first replays the last
             # known-good archive before accepting any buttons.
             restore_after_reconnect = should_restore_cached_profile(
                 profile_restore_required,
@@ -811,9 +844,9 @@ def run(
                 load_cached_key_digests(),
             )
             applied_digest = [baseline_digest]
-            # The D200 may still show the previous version while the new
-            # profile is rendered and transferred. Its cached mapping remains
-            # authoritative until the replacement upload commits.
+            # The D200 may still show the previous version while the complete
+            # replacement is rendered and transferred. Its cached mapping
+            # remains authoritative until the replacement upload commits.
             active_thread_routes = [
                 {"threadKey": thread_id, "hostId": None, "title": ""}
                 for thread_id in load_cached_slots()
@@ -855,7 +888,7 @@ def run(
             rendered_signature = [
                 (applied_digest[0], applied_digest[0])
             ]
-            print("D200 connected; native Codex mode active.", flush=True)
+            print("D200 connected; Codex state adapter active.", flush=True)
 
             def replace_prepared(
                 value: tuple[
@@ -1074,11 +1107,9 @@ def run(
                                 f"{elapsed * 1000:.0f}ms.",
                                 flush=True,
                             )
-                    except (OSError, RuntimeError) as error:
-                        print(
-                            f"Codex agent dispatch failed: {error}",
-                            file=sys.stderr,
-                            flush=True,
+                    except Exception as error:
+                        log_dispatch_error(
+                            f"Codex agent dispatch failed: {error}"
                         )
 
                 while not stopped and not session_stop.is_set():
@@ -1099,19 +1130,12 @@ def run(
                                 captured_at,
                             )
                             continue
-                        elif index in ACTION_KEYS:
-                            action = ACTION_KEYS[index]
-                            if action == "mic":
-                                native_adapter.desktop_action(
-                                    action,
-                                    pressed=pressed,
-                                )
-                            elif pressed:
-                                native_adapter.desktop_action(action)
-                        elif pressed and index == USAGE_DISPLAY_KEY:
-                            native_adapter.desktop_action("focus")
-                        elif pressed and index == FOCUS_KEY:
-                            native_adapter.desktop_action("focus")
+                        else:
+                            dispatch_surface_action(
+                                native_adapter,
+                                index,
+                                pressed,
+                            )
                         elapsed = time.monotonic() - captured_at
                         if elapsed >= 0.100:
                             print(
@@ -1120,11 +1144,9 @@ def run(
                                 f"(queue {max(0, dispatched_at - captured_at) * 1000:.0f}ms).",
                                 flush=True,
                             )
-                    except (OSError, RuntimeError) as error:
-                        print(
-                            f"Codex action dispatch failed: {error}",
-                            file=sys.stderr,
-                            flush=True,
+                    except Exception as error:
+                        log_dispatch_error(
+                            f"Codex action dispatch failed: {error}"
                         )
 
             state_thread = threading.Thread(
@@ -1474,9 +1496,13 @@ def main() -> int:
     )
     mode.add_argument(
         "--state",
+        action="store_true",
+        help="print one Bridge-first Codex snapshot without opening the D200",
+    )
+    mode.add_argument(
         "--native-state",
         action="store_true",
-        help="print one Codex app-server snapshot without opening the D200",
+        help="diagnose the legacy local/SSH native state source",
     )
     args = parser.parse_args()
     try:
@@ -1486,10 +1512,14 @@ def main() -> int:
         if args.diagnose:
             print(json.dumps(diagnose_device(), ensure_ascii=False, default=str))
             return 0
-        if args.state:
-            from native_codex import NativeCodex
+        if args.state or args.native_state:
+            from native_codex import CodexStateAdapter, NativeCodex
 
-            adapter = NativeCodex()
+            adapter = (
+                NativeCodex(enable_remote=True)
+                if args.native_state
+                else CodexStateAdapter()
+            )
             try:
                 deadline = time.time() + 12
                 revision = -1

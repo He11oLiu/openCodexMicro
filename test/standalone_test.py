@@ -228,14 +228,51 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(digest, "")
         self.assertEqual(keys, {})
 
-    def test_daemon_restart_keeps_the_applied_display_baseline(self):
+    def test_daemon_restart_forces_a_complete_display_baseline(self):
         digest, keys = D200.display_baseline_after_connect(
             False,
             "previous-frame",
             {0: "key-zero"},
         )
-        self.assertEqual(digest, "previous-frame")
-        self.assertEqual(keys, {0: "key-zero"})
+        self.assertEqual(digest, "")
+        self.assertEqual(keys, {})
+
+    def test_action_failure_is_isolated_from_the_next_key(self):
+        adapter = Mock()
+        adapter.desktop_action.side_effect = [RuntimeError("bridge 503"), None]
+        with patch.object(D200.sys, "stderr"):
+            self.assertFalse(D200.dispatch_surface_action(adapter, 10, True))
+        self.assertTrue(D200.dispatch_surface_action(adapter, 12, True))
+        self.assertEqual(
+            adapter.desktop_action.call_args_list,
+            [
+                unittest.mock.call("steer", pressed=True),
+                unittest.mock.call("submit"),
+            ],
+        )
+
+    def test_action_failure_survives_broken_error_stream(self):
+        adapter = Mock()
+        adapter.desktop_action.side_effect = RuntimeError("bridge 503")
+        broken_stderr = Mock()
+        broken_stderr.write.side_effect = OSError("closed")
+        with patch.object(D200.sys, "stderr", broken_stderr):
+            self.assertFalse(D200.dispatch_surface_action(adapter, 10, True))
+
+    def test_mic_and_steer_preserve_press_and_release_phases(self):
+        adapter = Mock()
+        for index in (10, 11):
+            self.assertTrue(D200.dispatch_surface_action(adapter, index, True))
+            self.assertTrue(D200.dispatch_surface_action(adapter, index, False))
+        self.assertEqual(
+            adapter.desktop_action.call_args_list,
+            [
+                unittest.mock.call("steer", pressed=True),
+                unittest.mock.call("steer", pressed=False),
+                unittest.mock.call("mic", pressed=True),
+                unittest.mock.call("mic", pressed=False),
+            ],
+        )
 
     def test_cached_button_mapping_survives_profile_version_upgrade(self):
         with tempfile.TemporaryDirectory() as directory:

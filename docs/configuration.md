@@ -7,7 +7,7 @@ keeps device-specific visuals in a separate theme file.
 
 | D200 key | Function | Native action |
 | --- | --- | --- |
-| 1–5 | Recent tasks | Bridge: Codex Micro bus; normal: local deep link or SSH Dock Recent |
+| 1–5 | Recent tasks | Bridge Micro store/event bus; normal launch: local-only fallback |
 | 6 | Fast | `composer.toggleFastMode` |
 | 7 | Usage / Focus | Focus Codex |
 | 8 | Pin | `toggleThreadPin` |

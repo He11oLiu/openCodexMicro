@@ -2,10 +2,15 @@ import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { CodexCdpClient } from "./codex-cdp.mjs";
+import { decodeThreadPathSegment } from "./thread-key.mjs";
 
 const execFileAsync = promisify(execFile);
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.CODEX_KEYBOARD_PORT || 17373);
+const configuredRefreshMs = Number(process.env.CODEX_KEYBOARD_REFRESH_MS || 500);
+const REFRESH_MS = Number.isFinite(configuredRefreshMs)
+  ? Math.max(250, configuredRefreshMs)
+  : 500;
 const client = new CodexCdpClient();
 let cached = {
   connected: false,
@@ -16,6 +21,7 @@ let cached = {
   updatedAt: Date.now()
 };
 let refreshPromise = null;
+let nextReconnectAt = 0;
 
 async function focusCodex() {
   await execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], {
@@ -23,14 +29,17 @@ async function focusCodex() {
   });
 }
 
-async function refresh() {
+async function refresh(force = false) {
   if (refreshPromise) return refreshPromise;
+  if (!force && Date.now() < nextReconnectAt) return;
   refreshPromise = (async () => {
     try {
       const snapshot = await client.snapshot();
       cached = { connected: true, ...snapshot, error: null, updatedAt: Date.now() };
+      nextReconnectAt = 0;
     } catch (error) {
       cached = { ...cached, connected: false, error: error.message, updatedAt: Date.now() };
+      nextReconnectAt = Date.now() + 2000;
     }
   })();
   try {
@@ -52,13 +61,10 @@ function json(response, status, body) {
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${HOST}:${PORT}`);
   if (request.method === "GET" && url.pathname === "/health") {
-    await refresh();
+    await refresh(true);
     return json(response, 200, { ok: true, codexConnected: cached.connected, updatedAt: cached.updatedAt });
   }
   if (request.method === "GET" && url.pathname === "/state") {
-    if (url.searchParams.get("refresh") === "1" || Date.now() - cached.updatedAt > 29000) {
-      await refresh();
-    }
     return json(response, 200, cached);
   }
   if (request.method === "POST" && url.pathname === "/focus") {
@@ -82,13 +88,17 @@ const server = createServer(async (request, response) => {
     }
   }
   const threadMatch = request.method === "POST" && url.pathname.match(
-    /^\/thread\/([0-9a-f-]{36})\/click$/i
+    /^\/thread\/([^/]+)\/click$/
   );
   if (threadMatch) {
     try {
+      const threadId = decodeThreadPathSegment(threadMatch[1]);
       const slot = Number(url.searchParams.get("slot") || 0);
+      if (!Number.isInteger(slot) || slot < 0 || slot > 5) {
+        throw new Error("Invalid Codex Micro slot");
+      }
       await Promise.all([
-        client.clickThread(threadMatch[1], slot),
+        client.clickThread(threadId, slot),
         focusCodex()
       ]);
       return json(response, 200, { ok: true, bridge: true });
@@ -145,7 +155,7 @@ server.listen(PORT, HOST, () => {
   void refresh();
 });
 
-const timer = setInterval(() => void refresh(), 30000);
+const timer = setInterval(() => void refresh(), REFRESH_MS);
 timer.unref();
 
 for (const signal of ["SIGINT", "SIGTERM"]) {

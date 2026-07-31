@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import os
 import queue
@@ -7,12 +8,14 @@ import tempfile
 import time
 import unittest
 from unittest.mock import MagicMock, Mock, patch
+from urllib.error import HTTPError, URLError
 from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "standalone"))
 
 from native_codex import (
+    CodexStateAdapter,
     NativeCodex,
     RolloutTail,
     RolloutWatcher,
@@ -27,6 +30,92 @@ from native_codex import (
 
 
 class NativeCodexTests(unittest.TestCase):
+    def test_bridge_state_is_authoritative_and_preserves_temporary_keys(self):
+        adapter = CodexStateAdapter(start=False)
+        temporary = "local:client-new-thread:f6805b8a-332a-43a0-a118-52d3e59542f6"
+        payload = {
+            "connected": True,
+            "slots": [{
+                "id": 0,
+                "threadKey": temporary,
+                "title": "Pending task",
+                "status": "working",
+                "selected": True,
+            }],
+            "usage": {"windows": [{"kind": "weekly", "remainingPercent": 70}]},
+            "updatedAt": 123,
+        }
+        with patch("native_codex.fetch_bridge_state", return_value=payload), patch(
+            "native_codex.NativeCodex"
+        ) as native:
+            adapter._poll_once()
+        state = adapter.snapshot()
+        self.assertEqual(state["source"], "bridge")
+        self.assertEqual(state["slots"][0]["threadKey"], temporary)
+        native.assert_not_called()
+
+    def test_bridge_failure_uses_local_only_native_fallback(self):
+        fallback = Mock()
+        fallback.snapshot.return_value = {
+            "connected": True,
+            "source": "native",
+            "slots": [{"threadKey": "local-only"}],
+            "usage": {"windows": []},
+            "error": None,
+        }
+        adapter = CodexStateAdapter(start=False)
+        adapter._bridge_failures = adapter.FALLBACK_AFTER_FAILURES - 1
+        with patch(
+            "native_codex.fetch_bridge_state",
+            side_effect=URLError("offline"),
+        ), patch("native_codex.NativeCodex", return_value=fallback) as native:
+            adapter._poll_once()
+        native.assert_called_once_with(enable_remote=False)
+        self.assertEqual(adapter.snapshot()["source"], "native-local")
+        adapter.close()
+        fallback.close.assert_called_once()
+
+    def test_bridge_recovery_closes_native_fallback(self):
+        fallback = Mock()
+        adapter = CodexStateAdapter(start=False)
+        adapter._fallback = fallback
+        adapter._state["source"] = "native-local"
+        with patch(
+            "native_codex.fetch_bridge_state",
+            return_value={"connected": True, "slots": [], "usage": None},
+        ):
+            adapter._poll_once()
+        self.assertEqual(adapter.snapshot()["source"], "bridge")
+        self.assertIsNone(adapter._fallback)
+        fallback.close.assert_called_once()
+
+    def test_state_adapter_routes_the_displayed_temporary_slot(self):
+        temporary = "local:client-new-thread:f6805b8a-332a-43a0-a118-52d3e59542f6"
+        adapter = CodexStateAdapter(
+            start=False,
+            bridge_url="http://127.0.0.1:19000",
+        )
+        adapter._state["slots"] = [
+            {"threadKey": "local:00000000-0000-0000-0000-000000000000"},
+            {"threadKey": temporary},
+        ]
+        with patch(
+            "native_codex.dispatch_bridge_thread",
+            return_value=True,
+        ) as bridge:
+            adapter.open_thread(temporary)
+        bridge.assert_called_once_with(
+            temporary,
+            1,
+            bridge_url="http://127.0.0.1:19000",
+        )
+
+    def test_native_remote_monitoring_is_explicit(self):
+        self.assertFalse(NativeCodex(start=False)._enable_remote)
+        self.assertTrue(
+            NativeCodex(start=False, enable_remote=True)._enable_remote
+        )
+
     def test_ignores_app_server_notifications_outside_status_chain(self):
         adapter = NativeCodex(start=False)
         adapter._on_notification({
@@ -83,6 +172,44 @@ class NativeCodexTests(unittest.TestCase):
         request = opener.open.call_args.args[0]
         self.assertTrue(request.full_url.endswith("/action/steer/down"))
 
+    def test_bridge_http_error_is_logged_and_returned_as_failure(self):
+        opener = Mock()
+        error = HTTPError(
+            "http://127.0.0.1:17373/action/steer/down",
+            503,
+            "Service Unavailable",
+            {},
+            io.BytesIO(b'{"ok":false}'),
+        )
+        opener.open.side_effect = error
+        try:
+            with patch("native_codex.build_opener", return_value=opener), patch(
+                "native_codex.sys.stderr"
+            ):
+                self.assertFalse(dispatch_bridge_action("steer", pressed=True))
+        finally:
+            error.close()
+
+    def test_bridge_temporary_thread_key_is_encoded_as_one_path_segment(self):
+        response = MagicMock()
+        response.read.return_value = b'{"ok":true,"bridge":true}'
+        opener = Mock()
+        opener.open.return_value = response
+        response.__enter__.return_value = response
+        temporary = "client-new-thread:f6805b8a-332a-43a0-a118-52d3e59542f6"
+        with patch("native_codex.build_opener", return_value=opener):
+            self.assertTrue(dispatch_bridge_thread(temporary, slot=1))
+        request = opener.open.call_args.args[0]
+        self.assertIn(
+            "/thread/client-new-thread%3Af6805b8a-332a-43a0-a118-52d3e59542f6/click",
+            request.full_url,
+        )
+
+    def test_bridge_rejects_unrecognized_thread_keys(self):
+        with patch("native_codex.build_opener") as opener:
+            self.assertFalse(dispatch_bridge_thread("arbitrary-thread"))
+        opener.assert_not_called()
+
     def test_bridge_steer_failure_never_falls_back_to_submit_shortcut(self):
         adapter = NativeCodex(start=False)
         with patch(
@@ -91,6 +218,25 @@ class NativeCodexTests(unittest.TestCase):
         ), patch("native_codex.dispatch_desktop_action") as fallback:
             adapter.desktop_action("steer")
         fallback.assert_not_called()
+
+    def test_bridge_mode_mic_failure_does_not_duplicate_with_shortcut(self):
+        adapter = CodexStateAdapter(start=False)
+        with patch(
+            "native_codex.dispatch_bridge_action",
+            return_value=False,
+        ), patch("native_codex.dispatch_desktop_action") as fallback:
+            adapter.desktop_action("mic", pressed=True)
+        fallback.assert_not_called()
+
+    def test_local_fallback_mic_uses_configured_shortcut(self):
+        adapter = CodexStateAdapter(start=False)
+        adapter._state["source"] = "native-local"
+        with patch(
+            "native_codex.dispatch_bridge_action",
+            return_value=False,
+        ), patch("native_codex.dispatch_desktop_action") as fallback:
+            adapter.desktop_action("mic", pressed=True)
+        fallback.assert_called_once_with("mic")
 
     def test_submit_uses_cmd_enter_when_configured(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1066,6 +1212,30 @@ class NativeCodexTests(unittest.TestCase):
         slot = adapter.snapshot()["slots"][0]
         self.assertFalse(slot["hostOnline"])
         self.assertEqual(slot["status"], "thinking")
+
+    def test_remote_sqlite_warning_preserves_inventory(self):
+        adapter = NativeCodex(start=False, enable_remote=True)
+        host_id = "remote-ssh-discovered:legacy"
+        adapter._remote_online[host_id] = True
+        adapter._remote_threads[host_id] = [{
+            "id": "remote-existing",
+            "hostId": host_id,
+            "path": "/home/admin/rollout.jsonl",
+            "recencyAt": 100,
+        }]
+        adapter._merge_threads()
+        with patch("native_codex.sys.stderr"):
+            self.assertTrue(adapter._handle_remote(host_id, {
+                "type": "warning",
+                "message": "malformed database schema",
+                "sqliteVersion": "3.7.17",
+                "mode": "rollout-only",
+            }))
+        self.assertEqual(adapter._threads[0]["id"], "remote-existing")
+        self.assertEqual(
+            adapter._remote_errors[host_id],
+            "malformed database schema",
+        )
 
     def test_five_newer_local_tasks_evict_an_older_ssh_task_globally(self):
         adapter = NativeCodex(start=False)
