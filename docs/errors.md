@@ -57,9 +57,15 @@
   单个 action bug 都不能让后续 Send、Steer、Mic 停止消费。
 - Bridge 端口只能绑定 `127.0.0.1`。sidecar 不得监听 LAN，也不得把 CDP
   WebSocket 暴露给非本机来源。
+- Bridge launcher 不能用过短的固定窗口判断失败。Codex 冷启动可能超过六秒；
+  当前至少等待三十秒，并在进程提前退出时才提前失败。adapter 对短暂 renderer
+  重载保留五秒迟滞，不能因三次 250ms poll 失败就误切 local-only。
 - 非 Bridge 模式必须明确标记为 local-only；禁止默认建立远端 SSH monitor。
 - inventory/recent 事件先写入 staged logical frame，经过短静默窗口只发布最终 revision；禁止首查和补查各自启动一次 HID 事务。
 - profile 传完不等于画面已经提交。像素摘要、五键 thread 映射和缓存必须在固件激活命令成功后原子切换。
+- USB 重连不得先同步上传旧缓存、再上传最新整帧；这会把等待时间翻倍且在第一
+  次上传期间饿死按键读取。新 HID 会话清空摘要后，只通过正常事务上传一次当前
+  最新完整 framebuffer。
 - 独立 app-server 不会自动订阅 Desktop 已加载线程。approval、input、error 等状态不能只依赖它的线程通知。
 - Usage 每十分钟主动刷新是硬期限，持续文件事件不能饿死它；通知只用于提前刷新。
 

@@ -15,7 +15,7 @@ Codex renderer Micro store
                     │
              CodexStateAdapter ──────────────> D200 profile queue ──> USB HID
                     │
-          Bridge 不可用（连续三次）
+          Bridge 不可用（连续五秒）
                     v
        NativeCodex(enable_remote=False)
           └─ 本机 app-server + rollout/kqueue
@@ -40,7 +40,9 @@ Micro store 自己负责本机/远端统一排序、状态与 host assignment。
 临时键会原样经过 Bridge；Codex 晋升为正式 conversation UUID 后，下一个 snapshot
 原子替换 D200 映射。
 
-Bridge 连续三次不可用后，adapter 才创建 `NativeCodex(enable_remote=False)`。
+Bridge 连续不可用五秒后，adapter 才创建 `NativeCodex(enable_remote=False)`；
+短暂的 sidecar 请求失败或 renderer 重载继续保留最后一个 Bridge framebuffer，
+不会闪切 local-only。
 fallback 使用本机 app-server inventory、rollout/kqueue lifecycle 与本机 deep
 link，不创建 SSH 进程。Bridge 恢复后立即关闭 fallback。旧的远端 monitor 仍可
 用 `--native-state` 显式诊断；远端 SQLite schema 不兼容时保留上一 inventory，
@@ -84,9 +86,9 @@ renderer 可能已经执行动作但响应丢失，重放会造成双重 New/For
 6. HID 输出事务开始后不中断；每个包之前仍先处理按键。
 7. ZIP 传输完成后，用固件激活命令一次提交像素、图片摘要和按键到 thread 的映射。
 8. 事务期间若目标已经变化，当前 framebuffer 激活后直接构建最终目标，不重放中间版本。
-9. 局部画面可见后，低优先级线程才重建完整的 USB 重连缓存。
-10. 一旦观察到真实 USB 断开，重连会清空整帧及所有逐键摘要；缓存画面用于立即
-    恢复可见内容，随后实时状态必须以完整 profile 重传全部键。
+9. 每个新 HID 会话都清空整帧及所有逐键摘要，只通过正常的 input-priority
+    事务上传一次当前最新完整 profile；不先同步重放旧缓存，也不后台重建第二份
+    reconnect ZIP。
 
 固定功能键从磁盘预渲染素材读取并缓存。只有变化的任务键或 Usage 会进入线上的 sparse profile；未变化任务键与固定键不重新传输。D200 固件时钟不属于图片 profile，驱动每 30 秒发送 mode 1 保活。
 

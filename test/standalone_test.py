@@ -214,11 +214,6 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(D200.reconnect_delay(missing, 100), 5.0)
         self.assertEqual(D200.reconnect_delay(OSError("write failed"), 100), 10.0)
 
-    def test_cached_profile_replays_only_after_a_real_disconnect(self):
-        self.assertFalse(D200.should_restore_cached_profile(False, b"profile"))
-        self.assertFalse(D200.should_restore_cached_profile(True, None))
-        self.assertTrue(D200.should_restore_cached_profile(True, b"profile"))
-
     def test_usb_reconnect_forgets_every_applied_key_digest(self):
         digest, keys = D200.display_baseline_after_connect(
             True,

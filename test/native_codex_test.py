@@ -64,7 +64,9 @@ class NativeCodexTests(unittest.TestCase):
             "error": None,
         }
         adapter = CodexStateAdapter(start=False)
-        adapter._bridge_failures = adapter.FALLBACK_AFTER_FAILURES - 1
+        adapter._bridge_failure_since = (
+            time.monotonic() - adapter.FALLBACK_AFTER_SECONDS
+        )
         with patch(
             "native_codex.fetch_bridge_state",
             side_effect=URLError("offline"),
@@ -74,6 +76,18 @@ class NativeCodexTests(unittest.TestCase):
         self.assertEqual(adapter.snapshot()["source"], "native-local")
         adapter.close()
         fallback.close.assert_called_once()
+
+    def test_transient_bridge_failures_do_not_publish_local_fallback(self):
+        adapter = CodexStateAdapter(start=False)
+        adapter._state["source"] = "bridge"
+        with patch(
+            "native_codex.fetch_bridge_state",
+            side_effect=URLError("renderer reloading"),
+        ), patch("native_codex.NativeCodex") as native:
+            for _ in range(8):
+                adapter._poll_once()
+        self.assertEqual(adapter.snapshot()["source"], "bridge")
+        native.assert_not_called()
 
     def test_bridge_recovery_closes_native_fallback(self):
         fallback = Mock()
@@ -87,6 +101,7 @@ class NativeCodexTests(unittest.TestCase):
             adapter._poll_once()
         self.assertEqual(adapter.snapshot()["source"], "bridge")
         self.assertIsNone(adapter._fallback)
+        self.assertIsNone(adapter._bridge_failure_since)
         fallback.close.assert_called_once()
 
     def test_state_adapter_routes_the_displayed_temporary_slot(self):
@@ -108,6 +123,20 @@ class NativeCodexTests(unittest.TestCase):
             temporary,
             1,
             bridge_url="http://127.0.0.1:19000",
+        )
+
+    def test_local_fallback_navigation_skips_known_unavailable_bridge(self):
+        adapter = CodexStateAdapter(start=False)
+        adapter._state["source"] = "native-local"
+        thread_id = "f6805b8a-332a-43a0-a118-52d3e59542f6"
+        with patch("native_codex.dispatch_bridge_thread") as bridge, patch(
+            "native_codex.subprocess.Popen"
+        ) as deep_link:
+            adapter.open_thread(thread_id)
+        bridge.assert_not_called()
+        self.assertEqual(
+            deep_link.call_args.args[0],
+            ["/usr/bin/open", f"codex://threads/{thread_id}"],
         )
 
     def test_native_remote_monitoring_is_explicit(self):
@@ -249,23 +278,18 @@ class NativeCodexTests(unittest.TestCase):
             ["fast", "pin", "new", "fork", "submit"],
         )
 
-    def test_local_fallback_mic_uses_configured_shortcut(self):
-        adapter = CodexStateAdapter(start=False)
-        adapter._state["source"] = "native-local"
-        with patch(
-            "native_codex.dispatch_bridge_action",
-            return_value=False,
-        ), patch("native_codex.dispatch_desktop_action") as fallback:
-            adapter.desktop_action("mic", pressed=True)
-        fallback.assert_called_once_with("mic")
-
-    def test_local_fallback_uses_shortcut_only_on_key_down(self):
+    def test_local_fallback_uses_shortcuts_only_on_key_down(self):
         adapter = CodexStateAdapter(start=False)
         adapter._state["source"] = "native-local"
         with patch("native_codex.dispatch_desktop_action") as fallback:
-            adapter.desktop_action("fork", pressed=True)
-            adapter.desktop_action("fork", pressed=False)
-        fallback.assert_called_once_with("fork")
+            for action in ("fast", "pin", "new", "fork", "mic", "submit"):
+                adapter.desktop_action(action, pressed=True)
+                adapter.desktop_action(action, pressed=False)
+            adapter.desktop_action("steer", pressed=True)
+        self.assertEqual(
+            [call.args[0] for call in fallback.call_args_list],
+            ["fast", "pin", "new", "fork", "mic", "submit"],
+        )
 
     def test_submit_uses_cmd_enter_when_configured(self):
         with tempfile.TemporaryDirectory() as directory:

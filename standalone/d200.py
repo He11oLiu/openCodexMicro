@@ -52,7 +52,6 @@ CACHE_PATH = (
     / "openCodexMicro"
     / "d200-profile-cache.json"
 )
-PROFILE_CACHE_PATH = CACHE_PATH.with_name("d200-last-profile.zip")
 ACTION_KEYS = {
     5: "fast",
     7: "pin",
@@ -119,25 +118,19 @@ def reconnect_delay(error: OSError, attempt: int) -> float:
     return min(10.0, 0.5 * max(1, attempt))
 
 
-def should_restore_cached_profile(
-    profile_restore_required: bool,
-    cached_profile: bytes | None,
-) -> bool:
-    return profile_restore_required and cached_profile is not None
-
-
 def display_baseline_after_connect(
-    profile_restore_required: bool,
-    runtime_digest: str,
-    cached_key_digests: dict[int, str],
+    _profile_restore_required: bool,
+    _runtime_digest: str,
+    _cached_key_digests: dict[int, str],
 ) -> tuple[str, dict[int, str]]:
     """Treat every new HID session as requiring one complete framebuffer."""
     # The D200 exposes no readable framebuffer generation. A disk digest only
     # describes the last successful upload; it cannot prove that the currently
     # attached/powered display still contains it. Reusing that digest can turn
     # the first update into a partial profile and leave every unchanged key
-    # blank. The cached archive may still be replayed first after USB loss, but
-    # the current renderer state must always follow as a complete profile.
+    # blank. Replaying an old full archive before the live frame doubles
+    # reconnect latency and blocks button reads, so every session receives
+    # exactly one current full profile through the normal transaction loop.
     return "", {}
 
 
@@ -768,29 +761,6 @@ def save_cached_digest(
         print(f"D200 profile cache write failed: {error}", file=sys.stderr, flush=True)
 
 
-def load_cached_profile() -> bytes | None:
-    """Return the last fully transferred archive, never a partial write."""
-    try:
-        profile = PROFILE_CACHE_PATH.read_bytes()
-        with zipfile.ZipFile(io.BytesIO(profile)) as archive:
-            manifest = json.loads(archive.read("manifest.json"))
-        if len(manifest) != BUTTON_COUNT:
-            return None
-        return profile
-    except (OSError, zipfile.BadZipFile, KeyError, json.JSONDecodeError, TypeError):
-        return None
-
-
-def save_cached_profile(profile: bytes) -> None:
-    try:
-        PROFILE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        temporary = PROFILE_CACHE_PATH.with_suffix(".tmp")
-        temporary.write_bytes(profile)
-        temporary.replace(PROFILE_CACHE_PATH)
-    except OSError as error:
-        print(f"D200 profile archive cache write failed: {error}", file=sys.stderr, flush=True)
-
-
 def run(
     once: bool = False,
     output_writes: bool = OUTPUT_WRITES_ENABLED,
@@ -805,7 +775,6 @@ def run(
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     reconnect_attempt = 0
-    profile_restore_required = False
     last_connection_error = ""
     last_connection_log_at = 0.0
     runtime_applied_digest = "" if force_profile else load_cached_digest()
@@ -818,25 +787,16 @@ def run(
         state_thread = None
         action_thread = None
         render_thread = None
-        cache_thread = None
         agent_executor = None
         retry_delay = 0.0
         try:
             device = D200()
-            cached_profile = load_cached_profile()
-            # A reconnect after an observed USB loss first replays the last
-            # known-good archive before accepting any buttons.
-            restore_after_reconnect = should_restore_cached_profile(
-                profile_restore_required,
-                cached_profile,
-            )
             # A disk digest cannot prove that the D200 still contains a complete
             # profile after a USB disconnect, interrupted transfer, or power
-            # loss. Force the first live frame after reconnect to contain every
-            # key, even when the cached archive itself is unavailable. A normal
-            # daemon restart with no observed disconnect may retain the digest.
+            # loss. Force the first live frame of every HID session to contain
+            # every key, including a normal daemon restart.
             baseline_digest, applied_key_digests = display_baseline_after_connect(
-                profile_restore_required,
+                False,
                 runtime_applied_digest,
                 load_cached_key_digests(),
             )
@@ -868,11 +828,7 @@ def run(
                     dict[int, str],
                     bool,
                     float,
-                    dict[int, bytes],
                 ]
-            ] = queue.Queue(maxsize=1)
-            cache_profiles: queue.Queue[
-                tuple[str, dict[int, bytes]]
             ] = queue.Queue(maxsize=1)
             refresh_condition = threading.Condition()
             target = [
@@ -896,7 +852,6 @@ def run(
                     dict[int, str],
                     bool,
                     float,
-                    dict[int, bytes],
                 ] | None
             ) -> None:
                 while True:
@@ -1028,7 +983,6 @@ def run(
                                 key_digests,
                                 partial,
                                 request["changedAt"],
-                                icons,
                             )
                         )
                         rendered_signature[0] = (
@@ -1039,31 +993,6 @@ def run(
                             "D200 profile rendered "
                             f"{(time.monotonic() - request['changedAt']) * 1000:.0f}ms "
                             "after state detection.",
-                            flush=True,
-                        )
-
-            def build_profile_cache() -> None:
-                while not stopped and not session_stop.is_set():
-                    try:
-                        digest, icons = cache_profiles.get(timeout=0.5)
-                    except queue.Empty:
-                        continue
-                    # Cache maintenance is never on the state-to-display path.
-                    if session_stop.wait(0.250):
-                        return
-                    try:
-                        profile = make_valid_profile(icons)
-                    except RuntimeError as error:
-                        print(
-                            f"D200 background cache render failed: {error}",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                        continue
-                    if digest == applied_digest[0]:
-                        save_cached_profile(profile)
-                        print(
-                            "D200 full reconnect cache rebuilt in background.",
                             flush=True,
                         )
 
@@ -1161,35 +1090,16 @@ def run(
                 name="d200-profile-renderer",
                 daemon=True,
             )
-            cache_thread = threading.Thread(
-                target=build_profile_cache,
-                name="d200-profile-cache",
-                daemon=True,
-            )
             action_thread.start()
             if output_writes:
                 state_thread.start()
                 render_thread.start()
-                cache_thread.start()
             else:
                 state_thread = None
                 render_thread = None
-                cache_thread = None
                 state_ready.set()
 
-            if restore_after_reconnect:
-                recovery_profile = cached_profile or make_recovery_profile()
-                print(
-                    f"D200 restoring profile after USB reconnect ({len(recovery_profile)} bytes)…",
-                    flush=True,
-                )
-                device.upload(recovery_profile)
-                save_cached_profile(recovery_profile)
-                device.keep_alive()
-                last_keep_alive = time.monotonic()
-                profile_restore_required = False
-                print("D200 firmware display and clock restored.", flush=True)
-            elif output_writes and not applied_digest[0]:
+            if output_writes and not applied_digest[0]:
                 print("D200 setting initial brightness…", flush=True)
                 device.set_brightness(100)
                 time.sleep(COMMAND_SETTLE_SECONDS)
@@ -1214,12 +1124,10 @@ def run(
             upload_profile = None
             upload_thread_routes: list[dict] = []
             upload_key_digests: dict[int, str] = {}
-            upload_icons: dict[int, bytes] = {}
             upload_partial = False
             upload_size = 0
             upload_packet_index = 0
             activation_due = None
-            activation_cache: tuple[str, dict[int, bytes]] | None = None
             upload_changed_at = None
             while not stopped:
                 now = time.monotonic()
@@ -1269,7 +1177,6 @@ def run(
                             candidate_key_digests,
                             candidate_partial,
                             candidate_changed_at,
-                            candidate_icons,
                         ) = prepared_profiles.get_nowait()
                     except queue.Empty:
                         candidate_digest = None
@@ -1312,7 +1219,6 @@ def run(
                             upload_profile = profile
                             upload_thread_routes = candidate_thread_routes
                             upload_key_digests = candidate_key_digests
-                            upload_icons = candidate_icons
                             upload_partial = candidate_partial
                             upload_reports = iter(
                                 device.profile_reports(
@@ -1374,13 +1280,6 @@ def run(
                         ],
                         applied_key_digests,
                     )
-                    if upload_partial and upload_digest is not None:
-                        activation_cache = (
-                            upload_digest,
-                            upload_icons.copy(),
-                        )
-                    elif upload_profile is not None:
-                        save_cached_profile(upload_profile)
                     print(
                         f"D200 profile visible at {time.strftime('%H:%M:%S')}; "
                         "physical display latency "
@@ -1392,18 +1291,9 @@ def run(
                     upload_profile = None
                     upload_thread_routes = []
                     upload_key_digests = {}
-                    upload_icons = {}
                     upload_partial = False
                     with refresh_condition:
                         refresh_condition.notify_all()
-                    if activation_cache is not None:
-                        while True:
-                            try:
-                                cache_profiles.get_nowait()
-                            except queue.Empty:
-                                break
-                        cache_profiles.put_nowait(activation_cache)
-                        activation_cache = None
                     if once:
                         return
                 elif (
@@ -1434,7 +1324,6 @@ def run(
                     time.sleep(0.001)
         except OSError as error:
             reconnect_attempt += 1
-            profile_restore_required = True
             if once:
                 raise
             retry_delay = reconnect_delay(error, reconnect_attempt)
@@ -1459,8 +1348,6 @@ def run(
                 with refresh_condition:
                     refresh_condition.notify_all()
                 render_thread.join(timeout=1)
-            if cache_thread is not None:
-                cache_thread.join(timeout=1)
             if agent_executor is not None:
                 agent_executor.shutdown(wait=False, cancel_futures=True)
             if device is not None:

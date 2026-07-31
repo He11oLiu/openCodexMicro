@@ -2500,7 +2500,7 @@ class CodexStateAdapter:
     """Prefer renderer Micro state and fall back to local-only NativeCodex."""
 
     POLL_SECONDS = 0.250
-    FALLBACK_AFTER_FAILURES = 3
+    FALLBACK_AFTER_SECONDS = 5.0
 
     def __init__(
         self,
@@ -2514,6 +2514,7 @@ class CodexStateAdapter:
         self._stopped = threading.Event()
         self._fallback: NativeCodex | None = None
         self._bridge_failures = 0
+        self._bridge_failure_since: float | None = None
         self._announced_source: str | None = None
         self._state = {
             "connected": False,
@@ -2586,6 +2587,7 @@ class CodexStateAdapter:
             if not payload.get("connected"):
                 raise RuntimeError(str(payload.get("error") or "Bridge disconnected"))
             self._bridge_failures = 0
+            self._bridge_failure_since = None
             self._publish(self._bridge_frame(payload))
             self._close_fallback()
             return
@@ -2601,10 +2603,13 @@ class CodexStateAdapter:
         ) as caught:
             error = caught
             self._bridge_failures += 1
+            if self._bridge_failure_since is None:
+                self._bridge_failure_since = time.monotonic()
 
         with self._lock:
             bridge_is_active = self._state.get("source") == "bridge"
-        if bridge_is_active and self._bridge_failures < self.FALLBACK_AFTER_FAILURES:
+        failure_age = time.monotonic() - (self._bridge_failure_since or 0.0)
+        if bridge_is_active and failure_age < self.FALLBACK_AFTER_SECONDS:
             return
         if self._fallback is None:
             self._fallback = NativeCodex(enable_remote=False)
@@ -2641,6 +2646,8 @@ class CodexStateAdapter:
         host_id: str | None = None,
         title: str = "",
     ) -> None:
+        with self._lock:
+            bridge_mode = self._state.get("source") == "bridge"
         slot_index = next(
             (
                 index
@@ -2649,11 +2656,14 @@ class CodexStateAdapter:
             ),
             0,
         )
-        if dispatch_bridge_thread(
-            thread_id,
-            slot_index,
-            bridge_url=self._bridge_url,
-        ):
+        if bridge_mode:
+            # Navigation can complete before a lost HTTP response is observed.
+            # Do not race it with a deep link or a different local host route.
+            dispatch_bridge_thread(
+                thread_id,
+                slot_index,
+                bridge_url=self._bridge_url,
+            )
             return
         normalized = str(thread_id).removeprefix("local:")
         if re.fullmatch(THREAD_UUID_PATTERN, normalized):

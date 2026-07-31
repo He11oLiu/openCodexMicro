@@ -252,10 +252,13 @@ fi
   --remote-allow-origins=http://127.0.0.1:9222 \\
   >>"$bridge_log" 2>&1 &
 
-for attempt in {1..60}; do
+for attempt in {1..300}; do
   if /usr/bin/curl --noproxy '*' --silent --fail --max-time 0.2 \\
     http://127.0.0.1:9222/json/version >/dev/null 2>&1; then
     exit 0
+  fi
+  if ! /usr/bin/pgrep -x ChatGPT >/dev/null 2>&1; then
+    break
   fi
   /bin/sleep 0.1
 done

@@ -9,6 +9,12 @@
   Micro press/release events; Pin/New invoke their semantic renderer controls.
 - Suppress shortcut replay after uncertain Bridge failures so one-shot actions
   and toggles cannot execute twice.
+- Wait up to 30 seconds for a cold Codex Bridge launch and keep the last Bridge
+  source through five seconds of transient renderer failures, preventing a
+  false fallback alert while the CDP endpoint is still coming online.
+- On each D200 HID session, upload only the current full framebuffer. Remove
+  the synchronous stale-profile replay and background reconnect-ZIP rebuild
+  that doubled reconnect work, blocked button reads, and consumed idle CPU.
 
 ## 0.3.0 — 2026-07-31
 
