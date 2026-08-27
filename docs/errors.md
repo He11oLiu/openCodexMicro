@@ -18,9 +18,11 @@
 
 - `IOHIDDeviceSetReport` 可能异常变慢或失败；写入有有限重试和慢写日志。
 - `0x000d` 是局部 ZIP 事务，不是单个 HID report；包间仍要短且稳定。
-- USB 拔插是正常状态。守护进程应快速重新发现设备，并恢复最后成功 profile。
-- USB 断开后磁盘摘要不能证明设备仍保有完整 framebuffer。重连必须清空整帧与
-  逐键摘要并全量刷新；只有未观察到断线的普通 daemon 重启可以复用摘要。
+- USB 拔插是正常状态。守护进程应快速重新发现设备，但不重放旧的
+  缓存 profile。
+- 磁盘摘要不能证明设备仍保有完整 framebuffer。每个新 HID 会话
+  都必须清空整帧与逐键摘要，并且只通过正常输入优先事务上传一次
+  当前完整 profile；这也适用于未观察到 USB 断线的普通 daemon 重启。
 - 30 秒固件时钟保活必须保留，但要避开按键和正在进行的 profile 包。
 
 ## State consistency
@@ -28,8 +30,9 @@
 - Bridge 模式必须以 renderer Micro store 为唯一权威状态源；D200 不得同时把
   app-server、rollout、远端 SQLite 再聚合成另一套 Most Recent。
 - Bridge sidecar 每约 500ms 刷新缓存，`/state` 只能读取缓存，不能为每个请求
-  触发 CDP。首次发现后必须缓存 Micro bus、store node、resolver、context 和
-  rate-limit query client；引用失效时才重新扫描资源与 React Fiber。
+  触发 CDP。启用 Bridge 时发现的 Micro bus 可直接复用；缺失时只先探测
+  有 Micro/slot 信号的目标资源。slot source 最多缓存两秒，到期或 root、store、
+  六个 slot ID 校验失效时，必须重新扫描并更新 resolver、context 和 query client。
 - `client-new-thread:<uuid>` 是合法临时键，必须作为一个 URL 编码 path segment
   贯穿 Python、HTTP 和 CDP；只能额外接受正式 UUID，禁止放宽为任意字符串。
 - Bridge 不可用时默认只能启动 `NativeCodex(enable_remote=False)`。远端 SSH/SQLite
@@ -55,6 +58,8 @@
   local-only 后才允许快捷键路径。
 - 长生命周期动作 dispatcher 必须逐动作捕获异常。Bridge 503、日志输出失败或
   单个 action bug 都不能让后续 Send、Steer、Mic 停止消费。
+- 物理按下事件到真正 dispatch 时若已排队超过两秒，必须丢弃并记录为
+  expired；延迟的释放事件仍必须送达，避免 Micro action 停留在逻辑按下状态。
 - Bridge 端口只能绑定 `127.0.0.1`。sidecar 不得监听 LAN，也不得把 CDP
   WebSocket 暴露给非本机来源。
 - Bridge launcher 不能用过短的固定窗口判断失败。Codex 冷启动可能超过六秒；

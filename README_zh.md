@@ -15,11 +15,11 @@ openCodexMicro 为 Codex Desktop 提供一块专用硬件控制面板：直接�
 | 五个实时任务键 | 合并本机与 Codex 管理的 SSH 任务，按 Most Recent 排序并显示空闲、运行、完成、等待输入/审批或错误 |
 | 一键切换任务 | 打开实体按键当前显示的准确任务 |
 | Codex 常用控制 | Fast、Pin、New、Fork、Steer、Mic 和 Submit |
-| Usage 显示 | 展示剩余周额度并自动刷新 |
+| Usage 显示 | 展示 OpenAI 当前周窗口的剩余额度，不预测未来周期 |
 | 时钟与 Focus | 保留 D200 固件时钟，按下可聚焦 Codex |
 | Renderer 原生集成 | 直接使用 Codex Micro store 的本机/SSH 排序、状态、选中态和路由 |
 | 响应式显示 | 只传输发生变化的键，并始终优先处理实体输入 |
-| HID 恢复 | daemon 启动或 D200 重连后，先恢复可用缓存，再全量刷新所有按键 |
+| HID 恢复 | 每次 daemon 启动或 D200 重连都把 framebuffer 视为未知，完整上传当前 profile 后再提交新的按键映射 |
 
 ![openCodexMicro 平面键位示意图](docs/images/open-codex-micro-layout.png)
 
@@ -56,9 +56,11 @@ sidecar 两个用户级 LaunchAgent，并把 **Codex Bridge.app** 安装到
 Submit 和 Mic 发送官方 Micro 事件，Pin 和 New 调用对应的 renderer 控件。
 Bridge 模式中若 HTTP 响应不确定，不会再用 AppleScript 重放动作。
 
-Bridge 每 500ms 更新一次 renderer 状态缓存。JS 资源发现和 React Fiber 遍历
-只在每个 renderer 生命周期首次执行；后续快照直接读取缓存的 Micro store 引用。
-因此 `client-new-thread:<uuid>` 临时任务也会保留，直到 Codex 将它晋升为正式 UUID。
+Bridge 每 500ms 更新一次 renderer 状态缓存。大多数快照直接读取缓存的 Micro
+store 引用；source 缓存达到两秒，或 root/store/slot 结构失效时，会通过定向的
+Micro assets 和 React Fiber tree 重新发现。首次发现会复用 enable 阶段缓存的
+Micro bus，不再导入全部 renderer assets。这样既限制状态过期时间，也会保留
+`client-new-thread:<uuid>` 临时任务，直到 Codex 将它晋升为正式 UUID。
 
 如果 Codex 是普通方式启动，openCodexMicro 会自动启用 local-only 的
 app-server/rollout 回退，只显示本机任务；默认不再建立 SSH 连接或读取远端

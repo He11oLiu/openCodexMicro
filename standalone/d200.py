@@ -9,6 +9,7 @@ from functools import lru_cache
 import hashlib
 import io
 import json
+import math
 import os
 import queue
 import random
@@ -44,6 +45,10 @@ OUTPUT_WRITES_ENABLED = (
 # packet 5), while macOS' synchronous SetReport already provides backpressure.
 UPLOAD_PACKET_DELAY_SECONDS = 0.003
 COMMAND_SETTLE_SECONDS = 0.050
+ACTION_MAX_QUEUE_SECONDS = 2.0
+ACTION_DISPATCHED = "dispatched"
+ACTION_EXPIRED = "expired"
+ACTION_FAILED = "failed"
 PROFILE_VERSION = 26
 CACHE_PATH = (
     Path.home()
@@ -151,6 +156,40 @@ def dispatch_surface_action(
         phase = "down" if pressed else "up"
         log_dispatch_error(f"Codex action {index} {phase} failed: {error}")
         return False
+
+
+def dispatch_queued_action(
+    native_adapter: object,
+    index: int,
+    pressed: bool,
+    route: dict | None,
+    captured_at: float,
+    now: float | None = None,
+) -> str:
+    """Dispatch one queued input unless its key-down command has expired."""
+    dispatched_at = time.monotonic() if now is None else now
+    if (
+        pressed
+        and dispatched_at - captured_at > ACTION_MAX_QUEUE_SECONDS
+    ):
+        return ACTION_EXPIRED
+    if pressed and index < ACTIVE_SLOTS:
+        thread_id = str(route.get("threadKey") or "") if route else ""
+        if not thread_id:
+            raise RuntimeError(f"Native slot {index} has no displayed thread")
+        native_adapter.open_thread(
+            thread_id,
+            host_id=(
+                str(route.get("hostId"))
+                if route and route.get("hostId")
+                else None
+            ),
+            title=str(route.get("title") or "") if route else "",
+        )
+        return ACTION_DISPATCHED
+    if dispatch_surface_action(native_adapter, index, pressed):
+        return ACTION_DISPATCHED
+    return ACTION_FAILED
 
 
 def log_dispatch_error(message: str) -> None:
@@ -288,30 +327,69 @@ def render_action_icon(action: str) -> bytes:
 
 
 def render_usage_icon(usage: dict | None) -> bytes:
-    windows = {item.get("kind"): item for item in (usage or {}).get("windows", [])}
-    five_hour = windows.get("five-hour", {}).get("remainingPercent")
-    weekly = windows.get("weekly", {}).get("remainingPercent")
-    five_percent = None if five_hour is None else max(0, min(100, round(float(five_hour))))
-    weekly_percent = None if weekly is None else max(0, min(100, round(float(weekly))))
-    return render_usage_values(five_percent, weekly_percent)
+    weekly = weekly_remaining_percent(usage)
+    weekly_percent = None if weekly is None else round(weekly)
+    return render_usage_values(None, weekly_percent)
+
+
+def remaining_window_percent(window: object) -> float | None:
+    """Read the current remaining percentage from a normalized window."""
+    if not isinstance(window, dict):
+        return None
+    value = window.get("remainingPercent")
+    if isinstance(value, bool):
+        return None
+    try:
+        percent = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isfinite(percent) and 0 <= percent <= 100:
+        return percent
+    return None
+
+
+def weekly_remaining_percent(usage: object) -> float | None:
+    if not isinstance(usage, dict):
+        return None
+    windows = usage.get("windows")
+    if not isinstance(windows, list):
+        return None
+    for window in windows:
+        if isinstance(window, dict) and window.get("kind") == "weekly":
+            return remaining_window_percent(window)
+    return None
+
+
+def available_usage(state: dict) -> dict | None:
+    if state.get("usageAvailable") is False:
+        return None
+    usage = state.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    return usage if weekly_remaining_percent(usage) is not None else None
 
 
 @lru_cache(maxsize=32)
 def render_usage_values(five_percent: int | None, weekly_percent: int | None) -> bytes:
-    remaining = weekly_percent if weekly_percent is not None else five_percent
+    # The physical Usage key shows the current weekly remainder. Providers
+    # calculate it directly from OpenAI's current usedPercent; no time-based
+    # prediction is involved.
+    # Keep the first argument for callers/themes from prior releases, but never
+    # substitute the five-hour limit when weekly data is unavailable.
+    percent = weekly_percent
     usage_theme = ICON_THEME.get("usage") or {}
-    if remaining is None:
+    if percent is None:
         progress = str(usage_theme.get("unknown") or "#858c8f")
         number_text = "—"
-    elif remaining >= 50:
+    elif percent >= 50:
         progress = str(usage_theme.get("high") or "#2fbd7f")
-        number_text = str(remaining)
-    elif remaining >= 20:
+        number_text = str(percent)
+    elif percent >= 20:
         progress = str(usage_theme.get("medium") or "#e89b2d")
-        number_text = str(remaining)
+        number_text = str(percent)
     else:
         progress = str(usage_theme.get("low") or "#e45861")
-        number_text = str(remaining)
+        number_text = str(percent)
     from PIL import Image, ImageColor, ImageDraw, ImageFilter
 
     # Supersampling preserves the shallow bevel and resin-tube highlights after
@@ -352,8 +430,8 @@ def render_usage_values(five_percent: int | None, weekly_percent: int | None) ->
             return tuple(round(value + (255 - value) * factor) for value in values)
         return tuple(round(value * factor) for value in values)
 
-    extent = 0 if remaining is None else 360 * remaining / 100
-    if remaining is not None:
+    extent = 0 if percent is None else 360 * percent / 100
+    if percent is not None:
         glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
         draw_arc(
             glow,
@@ -371,7 +449,7 @@ def render_usage_values(five_percent: int | None, weekly_percent: int | None) ->
     draw_arc(gauge, (41, 34, 155, 148), 360, (94, 108, 104, 145), tube_width + 6)
     draw_arc(gauge, ring_box, 360, (160, 172, 169, 255), tube_width + 2)
     draw_arc(gauge, ring_box, 360, (205, 214, 211, 255), 6)
-    if remaining is not None:
+    if percent is not None:
         draw_arc(
             gauge,
             ring_box,
@@ -393,7 +471,7 @@ def render_usage_values(five_percent: int | None, weekly_percent: int | None) ->
     font_size = max(20, min(38, int(usage_theme.get("fontSize") or 36)))
     value_font = load_latin_font(font_size * scale, True)
     text_fill = str(usage_theme.get("text") or "#303638")
-    if remaining is None:
+    if percent is None:
         draw.text(
             (98 * scale, (89 + ring_offset_y) * scale),
             number_text,
@@ -670,14 +748,8 @@ def icon_digest(state: dict) -> str:
         except (TypeError, ValueError):
             return None
 
-    usage_windows = {
-        item.get("kind"): normalized_percent(item.get("remainingPercent"))
-        for item in (state.get("usage") or {}).get("windows", [])
-    }
-    displayed_usage = (
-        usage_windows.get("weekly")
-        if usage_windows.get("weekly") is not None
-        else usage_windows.get("five-hour")
+    displayed_usage = normalized_percent(
+        weekly_remaining_percent(available_usage(state))
     )
     stable = {
         "profileVersion": PROFILE_VERSION,
@@ -944,7 +1016,9 @@ def run(
                             slot.get("threadKey"),
                             bool(state.get("connected")),
                         )
-                    icons[USAGE_DISPLAY_KEY] = render_usage_icon(state.get("usage"))
+                    icons[USAGE_DISPLAY_KEY] = render_usage_icon(
+                        available_usage(state)
+                    )
                     base_digest = applied_digest[0]
                     thread_routes = [
                         {
@@ -1003,29 +1077,21 @@ def run(
                     captured_at: float,
                 ) -> None:
                     try:
-                        thread_id = (
-                            str(route.get("threadKey") or "")
-                            if route is not None
-                            else ""
+                        outcome = dispatch_queued_action(
+                            native_adapter,
+                            index,
+                            True,
+                            route,
+                            captured_at,
                         )
-                        if not thread_id:
-                            raise RuntimeError(
-                                f"Native slot {index} has no displayed thread"
+                        if outcome == ACTION_EXPIRED:
+                            elapsed = time.monotonic() - captured_at
+                            print(
+                                f"D200 agent {index} down dropped after "
+                                f"{elapsed * 1000:.0f}ms in queue.",
+                                flush=True,
                             )
-                        native_adapter.open_thread(
-                            thread_id,
-                            host_id=(
-                                str(route.get("hostId"))
-                                if route is not None
-                                and route.get("hostId")
-                                else None
-                            ),
-                            title=(
-                                str(route.get("title") or "")
-                                if route is not None
-                                else ""
-                            ),
-                        )
+                            return
                         elapsed = time.monotonic() - captured_at
                         if elapsed >= 0.100:
                             print(
@@ -1056,12 +1122,24 @@ def run(
                                 captured_at,
                             )
                             continue
-                        else:
-                            dispatch_surface_action(
-                                native_adapter,
-                                index,
-                                pressed,
+                        outcome = dispatch_queued_action(
+                            native_adapter,
+                            index,
+                            pressed,
+                            thread_id,
+                            captured_at,
+                            now=dispatched_at,
+                        )
+                        if outcome == ACTION_EXPIRED:
+                            print(
+                                f"D200 action {index} {phase} dropped after "
+                                f"{(dispatched_at - captured_at) * 1000:.0f}ms "
+                                "in queue.",
+                                flush=True,
                             )
+                            continue
+                        if outcome == ACTION_FAILED:
+                            continue
                         elapsed = time.monotonic() - captured_at
                         if elapsed >= 0.100:
                             print(

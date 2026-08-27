@@ -55,6 +55,12 @@ sidecar LaunchAgents. It also installs and ad-hoc signs:
 ~/Applications/Codex Bridge.app
 ```
 
+The Bridge LaunchAgent prefers the stable Homebrew Node symlinks at
+`/opt/homebrew/bin/node` and `/usr/local/bin/node`, so a Cellar version upgrade
+does not strand the service on a removed executable. Candidates older than the
+documented Node requirement are skipped. Set `CODEX_KEYBOARD_NODE` while
+running the installer to select another compatible executable explicitly.
+
 The installer adds `realtimeVoice.toggleMicrophoneMute → Command+Alt+M` only
 when that Codex command has no existing shortcut override. It is the Mic
 fallback; Bridge mode uses the official Micro press/release path.
@@ -142,7 +148,12 @@ tail -f "$HOME/Library/Application Support/openCodexMicro/d200.log"
 tail -f "$HOME/Library/Application Support/openCodexMicro/d200-error.log"
 tail -f "$HOME/Library/Application Support/openCodexMicro/bridge.log"
 tail -f "$HOME/Library/Application Support/openCodexMicro/bridge-error.log"
+tail -f "$HOME/Library/Logs/openCodexMicro-codex-bridge.log"
 ```
+
+The last file is written by `Codex Bridge.app` itself and records launcher
+startup failures. It lives outside the runtime directory; the current
+`npm run uninstall` command does not remove this launcher log.
 
 ## Diagnostics
 
@@ -204,7 +215,8 @@ npm run uninstall
 
 This stops both openCodexMicro LaunchAgents, removes `Codex Bridge.app`, and
 deletes current and recognized legacy runtime directories. Back up a custom
-theme first.
+theme first. The separate launcher log at
+`~/Library/Logs/openCodexMicro-codex-bridge.log` is retained.
 
 ## Development
 

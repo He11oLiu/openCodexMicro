@@ -1,6 +1,6 @@
 {
   "name": "open-codex-micro",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "type": "module",
   "description": "Turn a Ulanzi D200 into openCodexMicro",
@@ -12,7 +12,7 @@
     "test": "python3 -m unittest discover -s test -p '*_test.py'",
     "test:node": "node --test test/*_test.mjs",
     "build:bridge": "node scripts/build-bridge.mjs",
-    "check:node": "node --check scripts/install.mjs && node --check scripts/uninstall.mjs && node --check scripts/build-bridge.mjs && node --check src/bridge/thread-key.mjs && node --check src/bridge/codex-cdp.mjs && node --check src/bridge/server.mjs",
+    "check:node": "node --check scripts/install.mjs && node --check scripts/node-path.mjs && node --check scripts/uninstall.mjs && node --check scripts/build-bridge.mjs && node --check src/bridge/thread-key.mjs && node --check src/bridge/codex-cdp.mjs && node --check src/bridge/server.mjs",
     "check": "npm run test && npm run test:node && npm run check:node && npm run build:bridge",
     "setup": "node scripts/install.mjs",
     "install:native": "node scripts/install.mjs",

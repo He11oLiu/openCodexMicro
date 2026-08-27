@@ -20,11 +20,11 @@ you use most under your fingertips.
 | Five live task keys | Merge local and Codex-managed SSH tasks in Most Recent order, with idle, thinking, complete, input/approval, or error |
 | Instant task switching | Opens the exact task shown on the physical key |
 | Codex controls | Fast, Pin, New, Fork, Steer, Mic, and Submit |
-| Usage at a glance | Shows the remaining weekly allowance and refreshes it automatically |
+| Usage at a glance | Shows the current weekly allowance remaining, without predicting a future period |
 | Clock and Focus | Keeps the D200 firmware clock and uses it as a Codex focus key |
 | Renderer-native integration | Uses Codex's own Micro store for local/SSH ordering, status, selection, and routing |
 | Responsive display | Sends only changed keys and keeps input ahead of display transfers |
-| HID recovery | On daemon start or USB reconnect, restores cached content when available, then fully refreshes all keys |
+| HID recovery | Treats every daemon start or USB reconnect as an unknown framebuffer and sends one complete current profile before committing a new key mapping |
 
 ![openCodexMicro flat key layout](docs/images/open-codex-micro-layout.png)
 
@@ -64,11 +64,13 @@ an Enter shortcut. Fast, Fork, Submit, and Mic use Codex Micro events; Pin and
 New invoke the matching renderer controls. When Bridge mode is active these
 actions never replay through AppleScript after an uncertain HTTP response.
 
-The Bridge refreshes its cached renderer snapshot every 500ms. Expensive asset
-discovery and React Fiber traversal run only once per renderer lifecycle;
-subsequent snapshots read cached Micro store references. This also preserves
-temporary `client-new-thread:<uuid>` tasks until Codex promotes them to formal
-thread UUIDs.
+The Bridge refreshes its cached renderer snapshot every 500ms. Most snapshots
+read cached Micro store references. A source that is two seconds old, or whose
+root/store/slot shape is invalid, is discarded and rediscovered through the
+targeted Micro assets and React Fiber tree. Initial discovery reuses the Micro
+bus cached during enablement instead of importing every renderer asset. This
+bounds stale agent state while preserving temporary `client-new-thread:<uuid>`
+tasks until Codex promotes them to formal thread UUIDs.
 
 If Codex was launched normally, openCodexMicro automatically starts a
 local-only app-server/rollout fallback and shows only local tasks. It does not

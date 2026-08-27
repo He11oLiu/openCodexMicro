@@ -10,6 +10,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { selectLaunchAgentNode } from "./node-path.mjs";
 
 const home = homedir();
 const uid = process.getuid();
@@ -38,6 +39,7 @@ const bridgeAgent = join(
 const python = execFileSync("/usr/bin/which", ["python3"], {
   encoding: "utf8"
 }).trim();
+const launchAgentNode = selectLaunchAgentNode();
 const xml = (value) => String(value)
   .replaceAll("&", "&amp;")
   .replaceAll("<", "&lt;")
@@ -311,7 +313,7 @@ const bridgePlist = `<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
   <key>Label</key><string>io.opencodexmicro.bridge</string>
   <key>ProgramArguments</key><array>
-    <string>${xml(process.execPath)}</string>
+    <string>${xml(launchAgentNode)}</string>
     <string>${xml(join(appRoot, "bridge.mjs"))}</string>
   </array>
   <key>RunAtLoad</key><true/>
