@@ -43,6 +43,8 @@ class NativeCodexTests(unittest.TestCase):
                 "selected": True,
             }],
             "usage": {"windows": [{"kind": "weekly", "remainingPercent": 70}]},
+            "usageSource": "cdp",
+            "usageAvailable": True,
             "updatedAt": 123,
         }
         with patch("native_codex.fetch_bridge_state", return_value=payload), patch(
@@ -53,6 +55,244 @@ class NativeCodexTests(unittest.TestCase):
         self.assertEqual(state["source"], "bridge")
         self.assertEqual(state["slots"][0]["threadKey"], temporary)
         native.assert_not_called()
+
+    def test_missing_cdp_usage_uses_native_usage_without_losing_bridge_slots(self):
+        fallback = Mock()
+        fallback.snapshot.return_value = {
+            "connected": True,
+            "source": "native",
+            "slots": [{"threadKey": "native-slot"}],
+            "usage": {
+                "windows": [{"kind": "weekly", "remainingPercent": 61}],
+                "updatedAt": 456,
+            },
+            "error": None,
+        }
+        payload = {
+            "connected": True,
+            "slots": [{
+                "id": 0,
+                "threadKey": "local:bridge-slot",
+                "title": "Bridge task",
+                "status": "working",
+            }],
+            "usage": None,
+            "usageSource": "cdp",
+            "usageAvailable": False,
+            "updatedAt": 123,
+        }
+        adapter = CodexStateAdapter(start=False)
+        with patch(
+            "native_codex.fetch_bridge_state", return_value=payload
+        ), patch(
+            "native_codex.NativeCodex", return_value=fallback
+        ) as native:
+            adapter._poll_once()
+        state = adapter.snapshot()
+        native.assert_called_once_with(enable_remote=False)
+        self.assertEqual(state["source"], "bridge")
+        self.assertEqual(state["slots"][0]["threadKey"], "local:bridge-slot")
+        self.assertEqual(state["usageSource"], "native")
+        self.assertTrue(state["usageAvailable"])
+        self.assertEqual(state["usage"]["windows"][0]["remainingPercent"], 61)
+        adapter.close()
+
+    def test_five_hour_only_cdp_usage_uses_native_weekly_fallback(self):
+        fallback = Mock()
+        fallback.snapshot.return_value = {
+            "connected": True,
+            "source": "native",
+            "slots": [],
+            "usage": {
+                "windows": [{"kind": "weekly", "remainingPercent": 61}],
+                "updatedAt": 456,
+            },
+            "usageSource": "native",
+            "usageAvailable": True,
+            "error": None,
+        }
+        payload = {
+            "connected": True,
+            "slots": [{
+                "id": 0,
+                "threadKey": "local:bridge-slot",
+                "title": "Bridge task",
+                "status": "working",
+            }],
+            "usage": {
+                "windows": [{"kind": "five-hour", "remainingPercent": 80}],
+                "observedAt": 123,
+            },
+            "usageSource": "cdp",
+            "usageAvailable": True,
+            "updatedAt": 123,
+        }
+        adapter = CodexStateAdapter(start=False)
+        with patch(
+            "native_codex.fetch_bridge_state", return_value=payload
+        ), patch(
+            "native_codex.NativeCodex", return_value=fallback
+        ) as native:
+            adapter._poll_once()
+        state = adapter.snapshot()
+        native.assert_called_once_with(enable_remote=False)
+        self.assertEqual(state["slots"][0]["threadKey"], "local:bridge-slot")
+        self.assertEqual(state["usageSource"], "native")
+        self.assertTrue(state["usageAvailable"])
+        self.assertEqual(state["usage"]["windows"][0]["kind"], "weekly")
+        adapter.close()
+
+    def test_legacy_bridge_weekly_usage_without_availability_flag_is_valid(self):
+        payload = {
+            "connected": True,
+            "slots": [{
+                "id": 0,
+                "threadKey": "local:bridge-slot",
+                "title": "Bridge task",
+                "status": "working",
+            }],
+            "usage": {
+                "windows": [{"kind": "weekly", "remainingPercent": 61}],
+                "observedAt": 123,
+            },
+            "updatedAt": 123,
+        }
+        adapter = CodexStateAdapter(start=False)
+        with patch(
+            "native_codex.fetch_bridge_state", return_value=payload
+        ), patch("native_codex.NativeCodex") as native:
+            adapter._poll_once()
+        state = adapter.snapshot()
+        native.assert_not_called()
+        self.assertEqual(state["usageSource"], "cdp")
+        self.assertTrue(state["usageAvailable"])
+        self.assertEqual(state["usage"]["windows"][0]["kind"], "weekly")
+        adapter.close()
+
+    def test_explicitly_unavailable_bridge_usage_still_uses_native(self):
+        fallback = Mock()
+        fallback.snapshot.return_value = {
+            "connected": False,
+            "usage": {"windows": []},
+            "error": "app-server unavailable",
+        }
+        payload = {
+            "connected": True,
+            "slots": [],
+            "usage": {
+                "windows": [{"kind": "weekly", "remainingPercent": 61}],
+                "observedAt": 123,
+            },
+            "usageAvailable": False,
+        }
+        adapter = CodexStateAdapter(start=False)
+        with patch(
+            "native_codex.fetch_bridge_state", return_value=payload
+        ), patch(
+            "native_codex.NativeCodex", return_value=fallback
+        ) as native:
+            adapter._poll_once()
+        state = adapter.snapshot()
+        native.assert_called_once_with(enable_remote=False)
+        self.assertFalse(state["usageAvailable"])
+        self.assertEqual(state["usage"], {"windows": []})
+        adapter.close()
+
+    def test_malformed_bridge_windows_keep_slots_and_use_native_usage(self):
+        fallback = Mock()
+        fallback.snapshot.return_value = {
+            "connected": True,
+            "usage": {
+                "windows": [{"kind": "weekly", "remainingPercent": 61}],
+                "updatedAt": 456,
+            },
+            "error": None,
+        }
+        payload = {
+            "connected": True,
+            "slots": [{
+                "id": 0,
+                "threadKey": "local:bridge-slot",
+                "title": "Bridge task",
+                "status": "working",
+            }],
+            "usage": {"windows": 42},
+            "usageAvailable": True,
+        }
+        adapter = CodexStateAdapter(start=False)
+        with patch(
+            "native_codex.fetch_bridge_state", return_value=payload
+        ), patch(
+            "native_codex.NativeCodex", return_value=fallback
+        ):
+            adapter._poll_once()
+        state = adapter.snapshot()
+        self.assertEqual(state["slots"][0]["threadKey"], "local:bridge-slot")
+        self.assertEqual(state["usageSource"], "native")
+        self.assertTrue(state["usageAvailable"])
+        adapter.close()
+
+    def test_boolean_bridge_remaining_percent_uses_native_usage(self):
+        fallback = Mock()
+        fallback.snapshot.return_value = {
+            "connected": True,
+            "usage": {
+                "windows": [{"kind": "weekly", "remainingPercent": 61}],
+                "updatedAt": 456,
+            },
+            "error": None,
+        }
+        payload = {
+            "connected": True,
+            "slots": [{
+                "id": 0,
+                "threadKey": "local:bridge-slot",
+                "status": "working",
+            }],
+            "usage": {
+                "windows": [{"kind": "weekly", "remainingPercent": True}]
+            },
+            "usageAvailable": True,
+        }
+        adapter = CodexStateAdapter(start=False)
+        with patch(
+            "native_codex.fetch_bridge_state", return_value=payload
+        ), patch(
+            "native_codex.NativeCodex", return_value=fallback
+        ):
+            adapter._poll_once()
+        state = adapter.snapshot()
+        self.assertEqual(state["slots"][0]["threadKey"], "local:bridge-slot")
+        self.assertEqual(state["usageSource"], "native")
+        self.assertEqual(state["usage"]["windows"][0]["remainingPercent"], 61)
+        adapter.close()
+
+    def test_unavailable_native_usage_does_not_publish_stale_windows(self):
+        fallback = Mock()
+        fallback.snapshot.return_value = {
+            "connected": False,
+            "usage": {
+                "windows": [{"kind": "weekly", "remainingPercent": 22}],
+                "updatedAt": 456,
+            },
+            "error": "app-server unavailable",
+        }
+        payload = {
+            "connected": True,
+            "slots": [],
+            "usage": None,
+            "usageSource": "cdp",
+            "usageAvailable": False,
+        }
+        adapter = CodexStateAdapter(start=False)
+        with patch(
+            "native_codex.fetch_bridge_state", return_value=payload
+        ), patch("native_codex.NativeCodex", return_value=fallback):
+            adapter._poll_once()
+        state = adapter.snapshot()
+        self.assertFalse(state["usageAvailable"])
+        self.assertEqual(state["usage"], {"windows": []})
+        adapter.close()
 
     def test_bridge_failure_uses_local_only_native_fallback(self):
         fallback = Mock()
@@ -96,7 +336,16 @@ class NativeCodexTests(unittest.TestCase):
         adapter._state["source"] = "native-local"
         with patch(
             "native_codex.fetch_bridge_state",
-            return_value={"connected": True, "slots": [], "usage": None},
+            return_value={
+                "connected": True,
+                "slots": [],
+                "usage": {
+                    "windows": [{"kind": "weekly", "remainingPercent": 70}],
+                    "observedAt": 123,
+                },
+                "usageSource": "cdp",
+                "usageAvailable": True,
+            },
         ):
             adapter._poll_once()
         self.assertEqual(adapter.snapshot()["source"], "bridge")
@@ -1131,7 +1380,7 @@ class NativeCodexTests(unittest.TestCase):
             tail = adapter._tails[str(path.resolve())]
             self.assertGreater(tail.completed_at, tail.started_at)
 
-    def test_usage_converts_used_percent_to_remaining_windows(self):
+    def test_usage_converts_current_used_percent_to_remaining_without_prediction(self):
         result = usage_windows(
             {
                 "rateLimits": {
@@ -1155,6 +1404,54 @@ class NativeCodexTests(unittest.TestCase):
                 {"kind": "weekly", "remainingPercent": 10, "resetsAt": 2},
             ],
         )
+
+    def test_usage_rejects_missing_or_unsupported_window_durations(self):
+        result = usage_windows(
+            {
+                "rateLimits": {
+                    "primary": {"usedPercent": 20},
+                    "secondary": {
+                        "usedPercent": 90,
+                        "windowDurationMins": 1440,
+                    },
+                }
+            }
+        )
+        self.assertEqual(result, [])
+
+    def test_usage_rejects_percentages_outside_the_valid_range(self):
+        result = usage_windows(
+            {
+                "rateLimits": {
+                    "primary": {
+                        "usedPercent": -1,
+                        "windowDurationMins": 300,
+                    },
+                    "secondary": {
+                        "usedPercent": 101,
+                        "windowDurationMins": 10080,
+                    },
+                }
+            }
+        )
+        self.assertEqual(result, [])
+
+    def test_usage_rejects_boolean_percentages(self):
+        result = usage_windows(
+            {
+                "rateLimits": {
+                    "primary": {
+                        "usedPercent": True,
+                        "windowDurationMins": 300,
+                    },
+                    "secondary": {
+                        "usedPercent": False,
+                        "windowDurationMins": 10080,
+                    },
+                }
+            }
+        )
+        self.assertEqual(result, [])
 
     def test_reads_codex_managed_remote_ssh_hosts(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -143,6 +143,81 @@ class ProtocolTests(unittest.TestCase):
         }
         self.assertNotEqual(D200.icon_digest(state), D200.icon_digest(changed))
 
+    def test_unavailable_usage_is_not_rendered_from_stale_windows(self):
+        stale = {
+            "usage": {
+                "windows": [{"kind": "weekly", "remainingPercent": 79}]
+            },
+            "usageAvailable": False,
+        }
+        self.assertIsNone(D200.available_usage(stale))
+        self.assertEqual(
+            D200.available_usage({**stale, "usageAvailable": True}),
+            stale["usage"],
+        )
+        self.assertEqual(
+            D200.icon_digest(stale),
+            D200.icon_digest({"usage": None, "usageAvailable": False}),
+        )
+        self.assertNotEqual(
+            D200.icon_digest(stale),
+            D200.icon_digest({**stale, "usageAvailable": True}),
+        )
+
+    def test_five_hour_only_usage_is_not_displayable_as_weekly(self):
+        five_hour_only = {
+            "usage": {
+                "windows": [{"kind": "five-hour", "remainingPercent": 79}]
+            },
+            "usageAvailable": True,
+        }
+        self.assertIsNone(D200.available_usage(five_hour_only))
+        self.assertEqual(
+            D200.icon_digest(five_hour_only),
+            D200.icon_digest({"usage": None, "usageAvailable": False}),
+        )
+
+    def test_malformed_sibling_usage_windows_do_not_break_weekly_display(self):
+        state = {
+            "usage": {
+                "windows": [
+                    "unexpected-shape",
+                    {"kind": "weekly", "remainingPercent": 79},
+                ]
+            },
+            "usageAvailable": True,
+        }
+        self.assertEqual(D200.available_usage(state), state["usage"])
+        self.assertIsInstance(D200.icon_digest(state), str)
+
+    def test_boolean_weekly_remaining_percent_is_not_displayable(self):
+        state = {
+            "usage": {
+                "windows": [{"kind": "weekly", "remainingPercent": True}]
+            },
+            "usageAvailable": True,
+        }
+        self.assertIsNone(D200.available_usage(state))
+
+    def test_current_remaining_percent_is_displayed_without_prediction(self):
+        state = {
+            "usage": {
+                "windows": [{"kind": "weekly", "remainingPercent": 80}]
+            },
+            "usageAvailable": True,
+        }
+        self.assertEqual(D200.available_usage(state), state["usage"])
+        self.assertEqual(D200.weekly_remaining_percent(state["usage"]), 80)
+
+    def test_used_percent_is_not_mislabeled_as_remaining(self):
+        state = {
+            "usage": {
+                "windows": [{"kind": "weekly", "usedPercent": 20}]
+            },
+            "usageAvailable": True,
+        }
+        self.assertIsNone(D200.available_usage(state))
+
     def test_icon_digest_ignores_title_when_task_keys_do_not_render_text(self):
         state = {
             "connected": True,
@@ -245,6 +320,96 @@ class ProtocolTests(unittest.TestCase):
                 unittest.mock.call("submit", pressed=True),
             ],
         )
+
+    def test_stale_agent_press_is_not_dispatched(self):
+        adapter = Mock()
+        route = {
+            "threadKey": "thread-stale",
+            "hostId": "host-a",
+            "title": "Stale task",
+        }
+
+        dispatched = D200.dispatch_queued_action(
+            adapter,
+            0,
+            True,
+            route,
+            captured_at=100.0,
+            now=102.001,
+        )
+
+        self.assertEqual(dispatched, "expired")
+        adapter.open_thread.assert_not_called()
+
+    def test_agent_expiration_is_checked_after_executor_backlog(self):
+        adapter = Mock()
+        worker_started = D200.threading.Event()
+        release_worker = D200.threading.Event()
+        clock = [100.0]
+
+        def block_worker():
+            worker_started.set()
+            release_worker.wait(1.0)
+
+        with D200.ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(block_worker)
+            self.assertTrue(worker_started.wait(1.0))
+            future = executor.submit(
+                lambda: D200.dispatch_queued_action(
+                    adapter,
+                    0,
+                    True,
+                    {"threadKey": "thread-stale"},
+                    captured_at=100.0,
+                    now=clock[0],
+                )
+            )
+            clock[0] = 102.001
+            release_worker.set()
+            outcome = future.result(timeout=1.0)
+
+        self.assertEqual(outcome, "expired")
+        adapter.open_thread.assert_not_called()
+
+    def test_stale_surface_press_is_dropped_but_release_is_preserved(self):
+        adapter = Mock()
+
+        press_dispatched = D200.dispatch_queued_action(
+            adapter,
+            12,
+            True,
+            None,
+            captured_at=100.0,
+            now=102.001,
+        )
+        release_dispatched = D200.dispatch_queued_action(
+            adapter,
+            12,
+            False,
+            None,
+            captured_at=100.0,
+            now=110.0,
+        )
+
+        self.assertEqual(press_dispatched, "expired")
+        self.assertEqual(release_dispatched, "dispatched")
+        adapter.desktop_action.assert_called_once_with("submit", pressed=False)
+
+    def test_queued_surface_action_reports_adapter_failure(self):
+        adapter = Mock()
+        adapter.desktop_action.side_effect = RuntimeError("bridge 503")
+
+        with patch.object(D200.sys, "stderr"):
+            outcome = D200.dispatch_queued_action(
+                adapter,
+                12,
+                True,
+                None,
+                captured_at=100.0,
+                now=100.1,
+            )
+
+        self.assertEqual(outcome, "failed")
 
     def test_action_failure_survives_broken_error_stream(self):
         adapter = Mock()

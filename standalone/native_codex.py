@@ -14,6 +14,7 @@ import base64
 from copy import deepcopy
 from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -669,7 +670,7 @@ class AppServerClient:
                 "clientInfo": {
                     "name": "open_codex_micro",
                     "title": "openCodexMicro",
-                    "version": "0.3.1",
+                    "version": "0.3.2",
                 },
                 "capabilities": {"experimentalApi": True},
             },
@@ -1336,23 +1337,77 @@ def title_of(thread: dict) -> str:
 
 
 def usage_windows(response: dict | None) -> list[dict]:
-    snapshot = (response or {}).get("rateLimits") or {}
+    if not isinstance(response, dict):
+        return []
+    snapshot = response.get("rateLimits") or {}
+    if not isinstance(snapshot, dict):
+        return []
     windows = []
     for value in (snapshot.get("primary"), snapshot.get("secondary")):
-        if not value or value.get("usedPercent") is None:
+        if not isinstance(value, dict) or value.get("usedPercent") is None:
             continue
-        duration = value.get("windowDurationMins")
-        kind = "five-hour" if duration is not None and duration <= 600 else "weekly"
+        if isinstance(value.get("usedPercent"), bool):
+            continue
+        try:
+            used_percent = float(value["usedPercent"])
+            duration = float(value["windowDurationMins"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (
+            not math.isfinite(used_percent) or
+            used_percent < 0 or used_percent > 100 or
+            not math.isfinite(duration)
+        ):
+            continue
+        if abs(duration - 300) <= 1:
+            kind = "five-hour"
+        elif abs(duration - 10080) <= 1:
+            kind = "weekly"
+        else:
+            continue
         windows.append(
             {
                 "kind": kind,
-                "remainingPercent": max(
-                    0, min(100, 100 - int(value["usedPercent"]))
+                "remainingPercent": (
+                    int(100 - used_percent)
+                    if used_percent.is_integer()
+                    else 100 - used_percent
                 ),
                 "resetsAt": value.get("resetsAt"),
             }
         )
     return windows
+
+
+def remaining_window_percent(window: object) -> float | None:
+    """Read the current remaining percentage from a normalized window."""
+    if not isinstance(window, dict):
+        return None
+    value = window.get("remainingPercent")
+    if isinstance(value, bool):
+        return None
+    try:
+        percent = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isfinite(percent) and 0 <= percent <= 100:
+        return percent
+    return None
+
+
+def usage_has_weekly_window(usage: object) -> bool:
+    """Return whether a provider supplied a displayable weekly percentage."""
+    if not isinstance(usage, dict):
+        return False
+    windows = usage.get("windows")
+    if not isinstance(windows, list):
+        return False
+    for window in windows:
+        if not isinstance(window, dict) or window.get("kind") != "weekly":
+            continue
+        if remaining_window_percent(window) is not None:
+            return True
+    return False
 
 
 class NativeCodex:
@@ -1390,6 +1445,8 @@ class NativeCodex:
             "source": "native",
             "slots": [],
             "usage": self._usage,
+            "usageSource": "native",
+            "usageAvailable": False,
             "error": "Starting Codex app-server",
             "updatedAt": int(time.time() * 1000),
         }
@@ -1842,6 +1899,11 @@ class NativeCodex:
                 "source": "native",
                 "slots": slots,
                 "usage": deepcopy(self._usage),
+                "usageSource": "native",
+                "usageAvailable": bool(
+                    error is None and self._usage.get("updatedAt") and
+                    usage_has_weekly_window(self._usage)
+                ),
                 "error": error,
                 "updatedAt": int(time.time() * 1000),
             }
@@ -1850,6 +1912,8 @@ class NativeCodex:
                 "source",
                 "slots",
                 "usage",
+                "usageSource",
+                "usageAvailable",
                 "error",
             )
             if all(
@@ -1871,7 +1935,7 @@ class NativeCodex:
             for slot in slots
         )
         usage_summary = "/".join(
-            f"{item.get('kind')}={item.get('remainingPercent')}"
+            f"{item.get('kind')}={remaining_window_percent(item)}"
             for item in self._usage.get("windows", [])
         ) or "unknown"
         print(
@@ -2521,6 +2585,8 @@ class CodexStateAdapter:
             "source": "bridge",
             "slots": [],
             "usage": {"windows": []},
+            "usageSource": "cdp",
+            "usageAvailable": False,
             "error": "Waiting for Codex Bridge",
             "updatedAt": int(time.time() * 1000),
         }
@@ -2534,7 +2600,12 @@ class CodexStateAdapter:
             self._monitor.start()
 
     @staticmethod
-    def _bridge_frame(payload: dict) -> dict:
+    def _bridge_frame(
+        payload: dict,
+        usage: dict | None = None,
+        usage_source: str | None = None,
+        usage_available: bool | None = None,
+    ) -> dict:
         slots = []
         for index, raw in enumerate((payload.get("slots") or [])[:SLOT_COUNT]):
             if not isinstance(raw, dict) or not raw.get("threadKey"):
@@ -2547,18 +2618,32 @@ class CodexStateAdapter:
                 "hostId": str(raw.get("hostId") or "renderer"),
                 "selected": bool(raw.get("selected")),
             })
-        usage = payload.get("usage")
+        if usage is None:
+            usage = payload.get("usage")
+        if usage_source is None:
+            usage_source = str(payload.get("usageSource") or "cdp")
+        if usage_available is None:
+            usage_available = (
+                bool(payload.get("usageAvailable"))
+                if "usageAvailable" in payload
+                else usage_has_weekly_window(usage)
+            )
         return {
             "connected": True,
             "source": "bridge",
             "slots": slots,
             "usage": usage if isinstance(usage, dict) else {"windows": []},
+            "usageSource": usage_source,
+            "usageAvailable": bool(usage_available),
             "error": None,
             "updatedAt": int(payload.get("updatedAt") or time.time() * 1000),
         }
 
     def _publish(self, state: dict) -> bool:
-        compared = ("connected", "source", "slots", "usage", "error")
+        compared = (
+            "connected", "source", "slots", "usage", "usageSource",
+            "usageAvailable", "error"
+        )
         with self._changed:
             if all(self._state.get(key) == state.get(key) for key in compared):
                 return False
@@ -2588,8 +2673,43 @@ class CodexStateAdapter:
                 raise RuntimeError(str(payload.get("error") or "Bridge disconnected"))
             self._bridge_failures = 0
             self._bridge_failure_since = None
-            self._publish(self._bridge_frame(payload))
-            self._close_fallback()
+            renderer_usage = payload.get("usage")
+            renderer_usage_available = bool(
+                usage_has_weekly_window(renderer_usage) and
+                (
+                    "usageAvailable" not in payload or
+                    payload.get("usageAvailable")
+                )
+            )
+            if (
+                renderer_usage_available
+            ):
+                self._publish(self._bridge_frame(
+                    payload,
+                    usage_available=True,
+                ))
+                self._close_fallback()
+                return
+            if self._fallback is None:
+                self._fallback = NativeCodex(enable_remote=False)
+            native_state = self._fallback.snapshot()
+            native_usage = native_state.get("usage")
+            native_available = bool(
+                native_state.get("connected") and
+                isinstance(native_usage, dict) and
+                native_usage.get("updatedAt") and
+                usage_has_weekly_window(native_usage)
+            )
+            self._publish(self._bridge_frame(
+                payload,
+                usage=(
+                    native_usage
+                    if native_available
+                    else {"windows": []}
+                ),
+                usage_source="native",
+                usage_available=native_available,
+            ))
             return
         except (
             HTTPError,

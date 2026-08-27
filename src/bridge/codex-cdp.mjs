@@ -8,6 +8,179 @@ const USAGE_REFRESH_MS = Math.max(
   15000,
   Number(process.env.CODEX_KEYBOARD_USAGE_REFRESH_SECONDS || 600) * 1000
 );
+export const SLOT_SOURCE_REFRESH_MS = 2000;
+
+export async function resolveMicroBus({
+  cachedBus,
+  urls,
+  importNamespace
+}) {
+  const isBus = (candidate) => Boolean(
+    candidate && typeof candidate === "object" &&
+    candidate.handlers instanceof Map &&
+    (typeof candidate.dispatchHostMessage === "function" ||
+      typeof candidate.dispatchMessage === "function")
+  );
+  if (isBus(cachedBus)) return cachedBus;
+  for (const url of [...new Set(urls)]
+    .filter((candidate) => /vscode-api|codex-micro|app-initial/.test(candidate))
+    .slice(0, 120)) {
+    try {
+      const namespace = await importNamespace(url);
+      const bus = Object.values(namespace).find(isBus);
+      if (bus) return bus;
+    } catch {}
+  }
+  return null;
+}
+
+export function isSlotSourceFresh(
+  source,
+  root,
+  now = Date.now(),
+  refreshMs = 2000
+) {
+  return Boolean(
+    source && source.root === root && source.node?.store &&
+    Number.isFinite(source.discoveredAt) &&
+    now - source.discoveredAt >= 0 &&
+    now - source.discoveredAt < refreshMs
+  );
+}
+
+export function readCachedSlotSource(
+  source,
+  root,
+  now = Date.now(),
+  refreshMs = 2000
+) {
+  if (!isSlotSourceFresh(source, root, now, refreshMs)) return null;
+  try {
+    const slots = source.node.store.get(
+      source.resolver.resolve(source.node, source.contextMap)
+    );
+    if (!(
+      Array.isArray(slots) && slots.length === 6 &&
+      slots.every((slot, index) => slot?.id === index)
+    )) return null;
+    return slots;
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveSlotSnapshot({
+  source,
+  root,
+  refreshMs = 2000,
+  discover,
+  invalidate = () => {},
+  clock = Date.now
+}) {
+  const slots = readCachedSlotSource(source, root, clock(), refreshMs);
+  if (slots) return { source, slots, cacheHit: true };
+  if (source) invalidate(source);
+  const discovered = await discover();
+  if (!discovered?.source || !(
+    Array.isArray(discovered.slots) && discovered.slots.length === 6 &&
+    discovered.slots.every((slot, index) => slot?.id === index)
+  )) {
+    throw new Error("Codex Micro slot store was not found");
+  }
+  return {
+    source: { ...discovered.source, discoveredAt: clock() },
+    slots: discovered.slots,
+    cacheHit: false
+  };
+}
+
+export function findRateLimitPayload(value, depth = 0, seen = new Set()) {
+  if (!value || typeof value !== "object" || depth > 4 || seen.has(value)) return null;
+  seen.add(value);
+  for (const key of ["rate_limit", "rateLimit", "rate_limits", "rateLimits"]) {
+    const candidate = value[key];
+    if (candidate && typeof candidate === "object") return candidate;
+  }
+  if (
+    value.primary_window || value.secondary_window ||
+    value.primaryWindow || value.secondaryWindow ||
+    value.primary || value.secondary
+  ) return value;
+  for (const nested of Object.values(value)) {
+    const found = findRateLimitPayload(nested, depth + 1, seen);
+    if (found) return found;
+  }
+  return null;
+}
+
+export function normalizeUsageWindow(window, role) {
+  if (!window || typeof window !== "object") return null;
+  const rawUsedPercent = window.used_percent ?? window.usedPercent;
+  if (
+    !["number", "string"].includes(typeof rawUsedPercent) ||
+    (typeof rawUsedPercent === "string" && !rawUsedPercent.trim())
+  ) return null;
+  const usedPercent = Number(rawUsedPercent);
+  if (!Number.isFinite(usedPercent) || usedPercent < 0 || usedPercent > 100) {
+    return null;
+  }
+  const seconds = Number(window.limit_window_seconds ?? window.limitWindowSeconds);
+  const durationMinutes = Number(window.windowDurationMins ?? window.window_duration_mins);
+  const minutes = Number.isFinite(seconds) && seconds > 0 ? seconds / 60
+    : Number.isFinite(durationMinutes) && durationMinutes > 0 ? durationMinutes
+      : null;
+  const kind = minutes != null && Math.abs(minutes - 300) <= 1 ? "five-hour"
+    : minutes != null && Math.abs(minutes - 10080) <= 1 ? "weekly"
+      : "other";
+  const used = Math.min(100, Math.max(0, usedPercent));
+  return {
+    id: kind === "other" ? role : kind,
+    kind,
+    usedPercent: used,
+    remainingPercent: 100 - used,
+    resetsAt: Number(window.reset_at ?? window.resetsAt) || null
+  };
+}
+
+export function selectRateLimitUsage(queries, now = Date.now()) {
+  const ranked = [...queries].sort((left, right) => {
+    const score = (query) => {
+      const key = String(JSON.stringify(query?.queryKey)).toLowerCase();
+      if (key === '["rate-limit-status"]') return 0;
+      return key.includes("rate") && key.includes("limit") ? 1 : 2;
+    };
+    return score(left) - score(right);
+  });
+  let refreshQuery = null;
+  for (const query of ranked) {
+    const key = String(JSON.stringify(query?.queryKey)).toLowerCase();
+    if (!refreshQuery && key.includes("rate") && key.includes("limit")) {
+      refreshQuery = query;
+    }
+    const rateLimit = findRateLimitPayload(query?.state?.data);
+    if (!rateLimit) continue;
+    const windows = [
+      normalizeUsageWindow(
+        rateLimit.primary_window ?? rateLimit.primaryWindow ?? rateLimit.primary,
+        "primary"
+      ),
+      normalizeUsageWindow(
+        rateLimit.secondary_window ?? rateLimit.secondaryWindow ?? rateLimit.secondary,
+        "secondary"
+      )
+    ].filter((window) => window && window.kind !== "other");
+    if (!windows.some((window) => window.kind === "weekly")) continue;
+    return {
+      query,
+      refreshQuery: query,
+      usage: {
+        windows,
+        observedAt: Number(query?.state?.dataUpdatedAt) || now
+      }
+    };
+  }
+  return { query: null, refreshQuery, usage: null };
+}
 const DEVICE_STATE = {
   type: "codex-micro-device-state-changed",
   state: { status: "connected", error: null, battery: { percentage: 100, isCharging: true } }
@@ -49,20 +222,17 @@ const ENABLE_EXPRESSION = `(async () => {
     ...[...document.querySelectorAll("link[href],script[src]")].map((el) => el.href || el.src),
     ...performance.getEntriesByType("resource").map((entry) => entry.name)
   ])].filter((url) => url.includes("/assets/") && url.endsWith(".js"));
-  for (const url of urls.filter((url) => /vscode-api|codex-micro|app-initial/.test(url)).slice(0, 120)) {
-    try {
-      const namespace = await import(url);
-      const bus = Object.values(namespace).find((candidate) =>
-        candidate && typeof candidate === "object" &&
-        candidate.handlers instanceof Map &&
-        (typeof candidate.dispatchHostMessage === "function" || typeof candidate.dispatchMessage === "function")
-      );
-      if (!bus) continue;
-      globalThis[Symbol.for("codex-keyboard-micro-bus")] = bus;
-      const dispatch = bus.dispatchHostMessage ?? bus.dispatchMessage;
-      dispatch.call(bus, ${JSON.stringify(DEVICE_STATE)});
-      return { ready: true, clients: clients.length };
-    } catch {}
+  const resolveMicroBus = ${resolveMicroBus.toString()};
+  const bus = await resolveMicroBus({
+    cachedBus: globalThis[Symbol.for("codex-keyboard-micro-bus")],
+    urls,
+    importNamespace: (url) => import(url)
+  });
+  if (bus) {
+    globalThis[Symbol.for("codex-keyboard-micro-bus")] = bus;
+    const dispatch = bus.dispatchHostMessage ?? bus.dispatchMessage;
+    dispatch.call(bus, ${JSON.stringify(DEVICE_STATE)});
+    return { ready: true, clients: clients.length };
   }
   return { ready: clients.length > 0, clients: clients.length };
 })()`;
@@ -76,33 +246,11 @@ const SNAPSHOT_EXPRESSION = `(async () => {
   const validSlots = (slots) =>
     Array.isArray(slots) && slots.length === 6 &&
     slots.every((slot, index) => slot?.id === index);
-  const readSource = (source) => {
-    if (!source || source.root !== root || !source.node?.store) {
-      throw new Error("Cached Codex Micro source is stale");
-    }
-    const slots = source.node.store.get(
-      source.resolver.resolve(source.node, source.contextMap)
-    );
-    if (!validSlots(slots)) throw new Error("Cached Codex Micro slots are stale");
-    return slots;
-  };
-
-  let source = globalThis[sourceKey];
-  let found = null;
-  let queryClients = new Set();
-  let cacheHit = false;
-  if (source) {
-    try {
-      found = readSource(source);
-      queryClients = new Set(source.queryClients ?? []);
-      cacheHit = true;
-    } catch {
-      delete globalThis[sourceKey];
-      source = null;
-    }
-  }
-
-  if (!found) {
+  const isSlotSourceFresh = ${isSlotSourceFresh.toString()};
+  const readCachedSlotSource = ${readCachedSlotSource.toString()};
+  const resolveSlotSnapshot = ${resolveSlotSnapshot.toString()};
+  const resolveMicroBus = ${resolveMicroBus.toString()};
+  const discoverSource = async () => {
     const urls = [...new Set([
       ...[...document.querySelectorAll("link[href],script[src]")].map((el) => el.href || el.src),
       ...performance.getEntriesByType("resource").map((entry) => entry.name)
@@ -110,17 +258,14 @@ const SNAPSHOT_EXPRESSION = `(async () => {
     const slotSignalsUrl = urls.find((url) => url.includes("/assets/codex-micro-slot-signals-"));
     if (!slotSignalsUrl) throw new Error("Codex Micro slot signals are not loaded");
 
-    const namespaces = [];
-    for (const url of urls) {
-      try { namespaces.push(await import(url)); } catch {}
-    }
-    const exportedValues = namespaces.flatMap((namespace) => Object.values(namespace));
-    const bus = exportedValues.find((candidate) =>
-      candidate && typeof candidate === "object" && candidate.handlers instanceof Map &&
-      (typeof candidate.dispatchHostMessage === "function" || typeof candidate.dispatchMessage === "function")
-    );
+    const busKey = Symbol.for("codex-keyboard-micro-bus");
+    const bus = await resolveMicroBus({
+      cachedBus: globalThis[busKey],
+      urls,
+      importNamespace: (url) => import(url)
+    });
     if (bus) {
-      globalThis[Symbol.for("codex-keyboard-micro-bus")] = bus;
+      globalThis[busKey] = bus;
       if ((bus.handlers.get("codex-micro-hid-event")?.size ?? 0) === 0) {
         (bus.dispatchHostMessage ?? bus.dispatchMessage).call(bus, ${JSON.stringify(DEVICE_STATE)});
       }
@@ -133,8 +278,10 @@ const SNAPSHOT_EXPRESSION = `(async () => {
     );
     const queue = [root[reactKey]];
     const seen = new Set();
-    queryClients = new Set();
-    while (queue.length && seen.size < 30000 && !found) {
+    const queryClients = new Set();
+    let found = null;
+    let sourceParts = null;
+    while (queue.length && seen.size < 30000) {
       const fiber = queue.pop();
       if (!fiber || seen.has(fiber)) continue;
       seen.add(fiber);
@@ -146,7 +293,7 @@ const SNAPSHOT_EXPRESSION = `(async () => {
           value && typeof value.getQueryCache === "function" &&
           typeof value.getQueryData === "function"
         ) queryClients.add(value);
-        if (!(value instanceof Map)) continue;
+        if (sourceParts || !(value instanceof Map)) continue;
         for (const node of value.values()) {
           if (!node?.store || typeof node.store.get !== "function") continue;
           for (const resolver of resolvers) {
@@ -154,32 +301,47 @@ const SNAPSHOT_EXPRESSION = `(async () => {
               const slots = node.store.get(resolver.resolve(node, value));
               if (validSlots(slots)) {
                 found = slots;
-                source = {
-                  root,
-                  node,
-                  resolver,
-                  contextMap: value,
-                  queryClients: [...queryClients]
-                };
-                globalThis[sourceKey] = source;
+                sourceParts = { node, resolver, contextMap: value };
                 break;
               }
             } catch {}
           }
-          if (found) break;
+          if (sourceParts) break;
         }
-        if (found) break;
       }
       queue.push(fiber.child, fiber.sibling);
     }
-    if (!found) throw new Error("Codex Micro slot store was not found");
-  }
+    if (!found || !sourceParts) throw new Error("Codex Micro slot store was not found");
+    return {
+      slots: found,
+      source: {
+        root,
+        ...sourceParts,
+        queryClients: [...queryClients]
+      }
+    };
+  };
+  const resolvedSource = await resolveSlotSnapshot({
+    source: globalThis[sourceKey],
+    root,
+    refreshMs: ${SLOT_SOURCE_REFRESH_MS},
+    discover: discoverSource,
+    invalidate: () => { delete globalThis[sourceKey]; }
+  });
+  const source = resolvedSource.source;
+  const found = resolvedSource.slots;
+  const queryClients = new Set(source.queryClients ?? []);
+  const cacheHit = resolvedSource.cacheHit;
+  if (!cacheHit) globalThis[sourceKey] = source;
   let usage = null;
+  const findRateLimitPayload = ${findRateLimitPayload.toString()};
+  const normalizeUsageWindow = ${normalizeUsageWindow.toString()};
+  const selectRateLimitUsage = ${selectRateLimitUsage.toString()};
   for (const queryClient of queryClients) {
     try {
-      const query = queryClient.getQueryCache().getAll().find((candidate) =>
-        JSON.stringify(candidate.queryKey) === '["rate-limit-status"]'
-      );
+      const queries = queryClient.getQueryCache().getAll();
+      const selected = selectRateLimitUsage(queries, Date.now());
+      const query = selected.refreshQuery;
       const now = Date.now();
       const updatedAt = Number(query?.state?.dataUpdatedAt) || 0;
       const refreshKey = Symbol.for("codex-keyboard-rate-limit-refresh-at");
@@ -191,34 +353,8 @@ const SNAPSHOT_EXPRESSION = `(async () => {
         globalThis[refreshKey] = now;
         try { Promise.resolve(query.fetch()).catch(() => {}); } catch {}
       }
-      const data = query?.state?.data;
-      const rateLimit = data?.rate_limit;
-      if (!rateLimit || typeof rateLimit !== "object") continue;
-      const normalizeWindow = (window, role) => {
-        if (!window || typeof window !== "object") return null;
-        const usedPercent = Number(window.used_percent);
-        if (!Number.isFinite(usedPercent)) return null;
-        const seconds = Number(window.limit_window_seconds);
-        const minutes = Number.isFinite(seconds) && seconds > 0 ? seconds / 60 : null;
-        const kind = minutes != null && Math.abs(minutes - 300) <= 1 ? "five-hour"
-          : minutes != null && Math.abs(minutes - 10080) <= 1 ? "weekly"
-            : "other";
-        const used = Math.min(100, Math.max(0, usedPercent));
-        return {
-          id: kind === "other" ? role : kind,
-          kind,
-          usedPercent: used,
-          remainingPercent: 100 - used,
-          resetsAt: Number(window.reset_at) || null
-        };
-      };
-      usage = {
-        windows: [
-          normalizeWindow(rateLimit.primary_window, "primary"),
-          normalizeWindow(rateLimit.secondary_window, "secondary")
-        ].filter(Boolean),
-        observedAt: updatedAt || now
-      };
+      if (!selected.usage) continue;
+      usage = selected.usage;
       break;
     } catch {}
   }
@@ -241,6 +377,8 @@ const SNAPSHOT_EXPRESSION = `(async () => {
       )
     })),
     usage,
+    usageSource: "cdp",
+    usageAvailable: Boolean(usage),
     bridgeSnapshot: {
       source: cacheHit ? "cache" : "discovery",
       durationMs: performance.now() - startedAt

@@ -29,11 +29,24 @@ Mic ─────> Bridge HTTP ──> Micro ACT10 down/up
 
 `CodexStateAdapter` 每 250ms 读取 sidecar 的内存缓存；sidecar 每 500ms 通过
 CDP 更新一次。`/state` 本身不执行 CDP，因此 D200 polling 不会放大 renderer
-负载。首次 snapshot 扫描 JS assets 与 React Fiber，定位 Micro bus、store node、
-resolver、context map 和 rate-limit query clients，并保存到 renderer 的
+负载。enable 阶段定位并缓存 Micro bus；首次 snapshot 复用这个 bus，只加载
+slot-signals 并扫描 React Fiber，定位 store node、resolver、context map 和
+rate-limit query clients。bus 缓存缺失时只探测定向的 Codex/Micro assets，不再
+顺序导入全部 renderer assets。snapshot source 保存到 renderer 的
 `Symbol.for("codex-keyboard-micro-snapshot-source")`。后续 snapshot 直接读这些
-引用；root 或 store 引用失效时才清除缓存并重新发现。本机实测热读取约
-0.2–1.2ms。
+引用，但 source 最多缓存两秒；TTL 到期、root/store 失效或六个 slot/id 校验
+失败时清除缓存并重新发现。因此 agent 启动、完成或切换后不会永久读取旧 store，
+同时绝大多数 500ms snapshot 仍是亚毫秒到数毫秒的热读取。
+
+CDP usage 会探测旧的 `rate-limit-status` 以及其他包含 rate-limit 数据的 query，
+并兼容 camelCase/snake_case 包装与 window 字段。只有 weekly window 的时长和数值
+成功验证时才标记 `usageAvailable=true`；这里显示当前 weekly window 的剩余百分比，
+即以 OpenAI 当前 `usedPercent` 计算 `100 - usedPercent`。这只是当前余额，不预测
+下一周期。five-hour window 可以随 weekly 一起保留，但不会单独驱动 D200 的
+Usage 键。renderer 连接正常但 usage 不可用时，adapter 保留
+Bridge slots/导航，并仅从本机 app-server 合并 usage；`usageSource` 明确记录为
+`cdp` 或 `native`，因此 `connected=true` 不再阻止用量 fallback。D200 只渲染
+`usageAvailable=true` 的数据，provider 失败时不会继续显示旧窗口。
 
 Micro store 自己负责本机/远端统一排序、状态与 host assignment。D200 只取前五
 个 slot，不再建立第二套 SSH/SQLite 聚合。slot 的 `client-new-thread:<uuid>`
@@ -79,14 +92,16 @@ renderer 可能已经执行动作但响应丢失，重放会造成双重 New/For
 按键读取永远优先于显示：
 
 1. HID 读循环捕获按下/抬起并立即放入动作队列。
-2. 动作线程向 Codex 分发，不等待渲染或 profile。
-3. 状态线程只更新“最新目标”。
-4. 渲染线程比较每个键的图片摘要，通过 `0x000d` 构建只含变化键的 sparse ZIP。
-5. 连续变化覆盖旧目标，不排队重放中间状态。
-6. HID 输出事务开始后不中断；每个包之前仍先处理按键。
-7. ZIP 传输完成后，用固件激活命令一次提交像素、图片摘要和按键到 thread 的映射。
-8. 事务期间若目标已经变化，当前 framebuffer 激活后直接构建最终目标，不重放中间版本。
-9. 每个新 HID 会话都清空整帧及所有逐键摘要，只通过正常的 input-priority
+2. 动作线程向 Codex 分发，不等待渲染或 profile；agent 动作使用三个 worker。
+3. key-down 在实际分发时若已排队超过两秒就过期丢弃；key-up 即使晚到仍会发送，
+   避免 Micro action 停留在按下状态。
+4. 状态线程只更新“最新目标”。
+5. 渲染线程比较每个键的图片摘要，通过 `0x000d` 构建只含变化键的 sparse ZIP。
+6. 连续变化覆盖旧目标，不排队重放中间状态。
+7. HID 输出事务开始后不中断；每个包之前仍先处理按键。
+8. ZIP 传输完成后，用固件激活命令一次提交像素、图片摘要和按键到 thread 的映射。
+9. 事务期间若目标已经变化，当前 framebuffer 激活后直接构建最终目标，不重放中间版本。
+10. 每个新 HID 会话都清空整帧及所有逐键摘要，只通过正常的 input-priority
     事务上传一次当前最新完整 profile；不先同步重放旧缓存，也不后台重建第二份
     reconnect ZIP。
 
@@ -102,6 +117,8 @@ renderer 可能已经执行动作但响应丢失，重放会造成双重 New/For
 - 迁移旧 CodexKeyboard 主题并清理旧服务；
 - 写入 openCodexMicro 用户级 LaunchAgent。
 - 构建并安装 loopback bridge sidecar LaunchAgent；
+- Bridge LaunchAgent 优先使用稳定 Homebrew Node symlink，并允许
+  `CODEX_KEYBOARD_NODE` 覆盖；
 - 生成、签名并安装 `~/Applications/Codex Bridge.app`；
 - 在 Mic command 缺失时补充 `Command+Alt+M`，保留已有用户覆盖。
 

@@ -18,6 +18,9 @@ let cached = {
     id, threadKey: null, title: null, status: "off", selected: false
   })),
   error: "Waiting for Codex",
+  usage: null,
+  usageSource: "cdp",
+  usageAvailable: false,
   updatedAt: Date.now()
 };
 let refreshPromise = null;
