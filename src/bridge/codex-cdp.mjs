@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import WebSocket from "ws";
 import { localThreadKey } from "./thread-key.mjs";
+import { selectRateLimitQuery } from "./rate-limit-query.mjs";
 import {
   collectRendererScriptUrls,
   readSignalValue,
@@ -125,43 +126,23 @@ export function normalizeUsageWindow(window, role) {
 }
 
 export function selectRateLimitUsage(queries, now = Date.now()) {
-  const ranked = [...queries].sort((left, right) => {
-    const score = (query) => {
-      const key = String(JSON.stringify(query?.queryKey)).toLowerCase();
-      if (key === '["rate-limit-status"]') return 0;
-      return key.includes("rate") && key.includes("limit") ? 1 : 2;
-    };
-    return score(left) - score(right);
-  });
-  let refreshQuery = null;
-  for (const query of ranked) {
-    const key = String(JSON.stringify(query?.queryKey)).toLowerCase();
-    if (!refreshQuery && key.includes("rate") && key.includes("limit")) {
-      refreshQuery = query;
-    }
-    const rateLimit = findRateLimitPayload(query?.state?.data);
-    if (!rateLimit) continue;
-    const windows = [
-      normalizeUsageWindow(
-        rateLimit.primary_window ?? rateLimit.primaryWindow ?? rateLimit.primary,
-        "primary"
-      ),
-      normalizeUsageWindow(
-        rateLimit.secondary_window ?? rateLimit.secondaryWindow ?? rateLimit.secondary,
-        "secondary"
-      )
-    ].filter((window) => window && window.kind !== "other");
-    if (!windows.some((window) => window.kind === "weekly")) continue;
-    return {
-      query,
-      refreshQuery: query,
-      usage: {
-        windows,
-        observedAt: Number(query?.state?.dataUpdatedAt) || now
-      }
-    };
-  }
-  return { query: null, refreshQuery, usage: null };
+  const query = selectRateLimitQuery(queries);
+  const rateLimit = findRateLimitPayload(query?.state?.data);
+  const windows = rateLimit ? [
+    normalizeUsageWindow(
+      rateLimit.primary_window ?? rateLimit.primaryWindow ?? rateLimit.primary,
+      "primary"
+    ),
+    normalizeUsageWindow(
+      rateLimit.secondary_window ?? rateLimit.secondaryWindow ?? rateLimit.secondary,
+      "secondary"
+    )
+  ].filter((window) => window && window.kind !== "other") : [];
+  const usage = windows.some((window) => window.kind === "weekly") ? {
+    windows,
+    observedAt: Number(query?.state?.dataUpdatedAt) || now
+  } : null;
+  return { query: usage ? query : null, refreshQuery: query, usage };
 }
 const DEVICE_STATE = {
   type: "codex-micro-device-state-changed",
@@ -313,30 +294,29 @@ const SNAPSHOT_EXPRESSION = `(async () => {
   const cacheHit = resolvedSource.cacheHit;
   if (!cacheHit) globalThis[sourceKey] = source;
   let usage = null;
+  const selectRateLimitQuery = ${selectRateLimitQuery.toString()};
   const findRateLimitPayload = ${findRateLimitPayload.toString()};
   const normalizeUsageWindow = ${normalizeUsageWindow.toString()};
   const selectRateLimitUsage = ${selectRateLimitUsage.toString()};
-  for (const queryClient of queryClients) {
-    try {
-      const queries = queryClient.getQueryCache().getAll();
-      const selected = selectRateLimitUsage(queries, Date.now());
-      const query = selected.refreshQuery;
-      const now = Date.now();
-      const updatedAt = Number(query?.state?.dataUpdatedAt) || 0;
-      const refreshKey = Symbol.for("codex-keyboard-rate-limit-refresh-at");
-      const lastAttempt = Number(globalThis[refreshKey]) || 0;
-      if (
-        query && typeof query.fetch === "function" &&
-        now - updatedAt >= ${USAGE_REFRESH_MS} && now - lastAttempt >= ${USAGE_REFRESH_MS}
-      ) {
-        globalThis[refreshKey] = now;
-        try { Promise.resolve(query.fetch()).catch(() => {}); } catch {}
-      }
-      if (!selected.usage) continue;
-      usage = selected.usage;
-      break;
-    } catch {}
-  }
+  const queries = [...queryClients].flatMap((queryClient) => {
+    try { return queryClient.getQueryCache().getAll(); } catch { return []; }
+  });
+  try {
+    const selected = selectRateLimitUsage(queries, Date.now());
+    const query = selected.refreshQuery;
+    const now = Date.now();
+    const updatedAt = Number(query?.state?.dataUpdatedAt) || 0;
+    const refreshKey = Symbol.for("codex-keyboard-rate-limit-refresh-at");
+    const lastAttempt = Number(globalThis[refreshKey]) || 0;
+    if (
+      query && typeof query.fetch === "function" &&
+      now - updatedAt >= ${USAGE_REFRESH_MS} && now - lastAttempt >= ${USAGE_REFRESH_MS}
+    ) {
+      globalThis[refreshKey] = now;
+      try { Promise.resolve(query.fetch()).catch(() => {}); } catch {}
+    }
+    usage = selected.usage;
+  } catch {}
   const active = document.querySelector("[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-active=true]")
     ?? document.querySelector("[data-app-action-sidebar-thread-id][aria-current=page]");
   const activeThreadKey = document.querySelector("[data-above-composer-conversation-id]")
