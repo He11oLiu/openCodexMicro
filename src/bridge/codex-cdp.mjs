@@ -2,6 +2,15 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import WebSocket from "ws";
 import { localThreadKey } from "./thread-key.mjs";
+import { selectRateLimitQuery } from "./rate-limit-query.mjs";
+import {
+  collectRendererScriptUrls,
+  readSignalValue,
+  rendererResourceUrls,
+  resolveMicroBus
+} from "./renderer-resources.mjs";
+
+export { resolveMicroBus } from "./renderer-resources.mjs";
 
 const execFileAsync = promisify(execFile);
 const USAGE_REFRESH_MS = Math.max(
@@ -9,30 +18,6 @@ const USAGE_REFRESH_MS = Math.max(
   Number(process.env.CODEX_KEYBOARD_USAGE_REFRESH_SECONDS || 600) * 1000
 );
 export const SLOT_SOURCE_REFRESH_MS = 2000;
-
-export async function resolveMicroBus({
-  cachedBus,
-  urls,
-  importNamespace
-}) {
-  const isBus = (candidate) => Boolean(
-    candidate && typeof candidate === "object" &&
-    candidate.handlers instanceof Map &&
-    (typeof candidate.dispatchHostMessage === "function" ||
-      typeof candidate.dispatchMessage === "function")
-  );
-  if (isBus(cachedBus)) return cachedBus;
-  for (const url of [...new Set(urls)]
-    .filter((candidate) => /vscode-api|codex-micro|app-initial/.test(candidate))
-    .slice(0, 120)) {
-    try {
-      const namespace = await importNamespace(url);
-      const bus = Object.values(namespace).find(isBus);
-      if (bus) return bus;
-    } catch {}
-  }
-  return null;
-}
 
 export function isSlotSourceFresh(
   source,
@@ -56,9 +41,7 @@ export function readCachedSlotSource(
 ) {
   if (!isSlotSourceFresh(source, root, now, refreshMs)) return null;
   try {
-    const slots = source.node.store.get(
-      source.resolver.resolve(source.node, source.contextMap)
-    );
+    const slots = readSignalValue(source.node, source.resolver, source.contextMap);
     if (!(
       Array.isArray(slots) && slots.length === 6 &&
       slots.every((slot, index) => slot?.id === index)
@@ -143,43 +126,23 @@ export function normalizeUsageWindow(window, role) {
 }
 
 export function selectRateLimitUsage(queries, now = Date.now()) {
-  const ranked = [...queries].sort((left, right) => {
-    const score = (query) => {
-      const key = String(JSON.stringify(query?.queryKey)).toLowerCase();
-      if (key === '["rate-limit-status"]') return 0;
-      return key.includes("rate") && key.includes("limit") ? 1 : 2;
-    };
-    return score(left) - score(right);
-  });
-  let refreshQuery = null;
-  for (const query of ranked) {
-    const key = String(JSON.stringify(query?.queryKey)).toLowerCase();
-    if (!refreshQuery && key.includes("rate") && key.includes("limit")) {
-      refreshQuery = query;
-    }
-    const rateLimit = findRateLimitPayload(query?.state?.data);
-    if (!rateLimit) continue;
-    const windows = [
-      normalizeUsageWindow(
-        rateLimit.primary_window ?? rateLimit.primaryWindow ?? rateLimit.primary,
-        "primary"
-      ),
-      normalizeUsageWindow(
-        rateLimit.secondary_window ?? rateLimit.secondaryWindow ?? rateLimit.secondary,
-        "secondary"
-      )
-    ].filter((window) => window && window.kind !== "other");
-    if (!windows.some((window) => window.kind === "weekly")) continue;
-    return {
-      query,
-      refreshQuery: query,
-      usage: {
-        windows,
-        observedAt: Number(query?.state?.dataUpdatedAt) || now
-      }
-    };
-  }
-  return { query: null, refreshQuery, usage: null };
+  const query = selectRateLimitQuery(queries);
+  const rateLimit = findRateLimitPayload(query?.state?.data);
+  const windows = rateLimit ? [
+    normalizeUsageWindow(
+      rateLimit.primary_window ?? rateLimit.primaryWindow ?? rateLimit.primary,
+      "primary"
+    ),
+    normalizeUsageWindow(
+      rateLimit.secondary_window ?? rateLimit.secondaryWindow ?? rateLimit.secondary,
+      "secondary"
+    )
+  ].filter((window) => window && window.kind !== "other") : [];
+  const usage = windows.some((window) => window.kind === "weekly") ? {
+    windows,
+    observedAt: Number(query?.state?.dataUpdatedAt) || now
+  } : null;
+  return { query: usage ? query : null, refreshQuery: query, usage };
 }
 const DEVICE_STATE = {
   type: "codex-micro-device-state-changed",
@@ -216,12 +179,9 @@ const ENABLE_EXPRESSION = `(async () => {
       });
     }
     client._memoCache = {};
-    client.$emt?.({ name: "values_updated" });
+    client.$emt?.({ name: "values_updated", status: client.loadingStatus });
   }
-  const urls = [...new Set([
-    ...[...document.querySelectorAll("link[href],script[src]")].map((el) => el.href || el.src),
-    ...performance.getEntriesByType("resource").map((entry) => entry.name)
-  ])].filter((url) => url.includes("/assets/") && url.endsWith(".js"));
+  const urls = (${rendererResourceUrls.toString()})();
   const resolveMicroBus = ${resolveMicroBus.toString()};
   const bus = await resolveMicroBus({
     cachedBus: globalThis[Symbol.for("codex-keyboard-micro-bus")],
@@ -246,15 +206,13 @@ const SNAPSHOT_EXPRESSION = `(async () => {
   const validSlots = (slots) =>
     Array.isArray(slots) && slots.length === 6 &&
     slots.every((slot, index) => slot?.id === index);
+  const readSignalValue = ${readSignalValue.toString()};
   const isSlotSourceFresh = ${isSlotSourceFresh.toString()};
   const readCachedSlotSource = ${readCachedSlotSource.toString()};
   const resolveSlotSnapshot = ${resolveSlotSnapshot.toString()};
   const resolveMicroBus = ${resolveMicroBus.toString()};
   const discoverSource = async () => {
-    const urls = [...new Set([
-      ...[...document.querySelectorAll("link[href],script[src]")].map((el) => el.href || el.src),
-      ...performance.getEntriesByType("resource").map((entry) => entry.name)
-    ])].filter((url) => url.includes("/assets/") && url.endsWith(".js"));
+    const urls = (${rendererResourceUrls.toString()})();
     const slotSignalsUrl = urls.find((url) => url.includes("/assets/codex-micro-slot-signals-"));
     if (!slotSignalsUrl) throw new Error("Codex Micro slot signals are not loaded");
 
@@ -276,7 +234,9 @@ const SNAPSHOT_EXPRESSION = `(async () => {
       candidate && typeof candidate === "object" &&
       typeof candidate.resolve === "function" && typeof candidate.createSubscriberAtom === "function"
     );
-    const queue = [root[reactKey]];
+    let rootFiber = root[reactKey];
+    while (rootFiber?.return) rootFiber = rootFiber.return;
+    const queue = [rootFiber?.stateNode?.current ?? rootFiber];
     const seen = new Set();
     const queryClients = new Set();
     let found = null;
@@ -298,7 +258,7 @@ const SNAPSHOT_EXPRESSION = `(async () => {
           if (!node?.store || typeof node.store.get !== "function") continue;
           for (const resolver of resolvers) {
             try {
-              const slots = node.store.get(resolver.resolve(node, value));
+              const slots = readSignalValue(node, resolver, value);
               if (validSlots(slots)) {
                 found = slots;
                 sourceParts = { node, resolver, contextMap: value };
@@ -334,30 +294,29 @@ const SNAPSHOT_EXPRESSION = `(async () => {
   const cacheHit = resolvedSource.cacheHit;
   if (!cacheHit) globalThis[sourceKey] = source;
   let usage = null;
+  const selectRateLimitQuery = ${selectRateLimitQuery.toString()};
   const findRateLimitPayload = ${findRateLimitPayload.toString()};
   const normalizeUsageWindow = ${normalizeUsageWindow.toString()};
   const selectRateLimitUsage = ${selectRateLimitUsage.toString()};
-  for (const queryClient of queryClients) {
-    try {
-      const queries = queryClient.getQueryCache().getAll();
-      const selected = selectRateLimitUsage(queries, Date.now());
-      const query = selected.refreshQuery;
-      const now = Date.now();
-      const updatedAt = Number(query?.state?.dataUpdatedAt) || 0;
-      const refreshKey = Symbol.for("codex-keyboard-rate-limit-refresh-at");
-      const lastAttempt = Number(globalThis[refreshKey]) || 0;
-      if (
-        query && typeof query.fetch === "function" &&
-        now - updatedAt >= ${USAGE_REFRESH_MS} && now - lastAttempt >= ${USAGE_REFRESH_MS}
-      ) {
-        globalThis[refreshKey] = now;
-        try { Promise.resolve(query.fetch()).catch(() => {}); } catch {}
-      }
-      if (!selected.usage) continue;
-      usage = selected.usage;
-      break;
-    } catch {}
-  }
+  const queries = [...queryClients].flatMap((queryClient) => {
+    try { return queryClient.getQueryCache().getAll(); } catch { return []; }
+  });
+  try {
+    const selected = selectRateLimitUsage(queries, Date.now());
+    const query = selected.refreshQuery;
+    const now = Date.now();
+    const updatedAt = Number(query?.state?.dataUpdatedAt) || 0;
+    const refreshKey = Symbol.for("codex-keyboard-rate-limit-refresh-at");
+    const lastAttempt = Number(globalThis[refreshKey]) || 0;
+    if (
+      query && typeof query.fetch === "function" &&
+      now - updatedAt >= ${USAGE_REFRESH_MS} && now - lastAttempt >= ${USAGE_REFRESH_MS}
+    ) {
+      globalThis[refreshKey] = now;
+      try { Promise.resolve(query.fetch()).catch(() => {}); } catch {}
+    }
+    usage = selected.usage;
+  } catch {}
   const active = document.querySelector("[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-active=true]")
     ?? document.querySelector("[data-app-action-sidebar-thread-id][aria-current=page]");
   const activeThreadKey = document.querySelector("[data-above-composer-conversation-id]")
@@ -437,13 +396,30 @@ export class CodexCdpClient {
     socket.on("close", () => this.disconnect());
     socket.on("error", () => this.disconnect());
     this.socket = socket;
+    await this.refreshRendererResources();
     await this.evaluate(ENABLE_EXPRESSION);
+  }
+
+  async refreshRendererResources() {
+    // Resource Timing can be cleared while imported modules remain loaded.
+    const { frameTree } = await this.sendCommand("Page.getResourceTree", {});
+    const urls = collectRendererScriptUrls(frameTree);
+    await this.evaluate(`(() => {
+      globalThis[Symbol.for("codex-keyboard-renderer-resource-urls")] = ${JSON.stringify(urls)};
+      return true;
+    })()`);
   }
 
   async snapshot() {
     await this.connect();
     try {
-      this.lastSnapshot = await this.evaluate(SNAPSHOT_EXPRESSION);
+      try {
+        this.lastSnapshot = await this.evaluate(SNAPSHOT_EXPRESSION);
+      } catch (error) {
+        if (!/Codex Micro slot signals are not loaded/.test(error.message)) throw error;
+        await this.refreshRendererResources();
+        this.lastSnapshot = await this.evaluate(SNAPSHOT_EXPRESSION);
+      }
       return this.lastSnapshot;
     } catch (error) {
       this.disconnect();
@@ -579,21 +555,17 @@ export class CodexCdpClient {
         );
       let bus = globalThis[cacheKey];
       if (!isMicroBus(bus)) {
-        const urls = [...new Set([
-          ...[...document.querySelectorAll("link[href],script[src]")].map((element) => element.href || element.src),
-          ...performance.getEntriesByType("resource").map((entry) => entry.name)
-        ])]
-          .filter((url) => url.includes("/assets/") && url.endsWith(".js"));
-        bus = null;
-        for (const url of urls) {
-          try {
-            const namespace = await import(url);
-            bus = Object.values(namespace).find(isMicroBus);
-            if (bus) {
-              globalThis[cacheKey] = bus;
-              break;
-            }
-          } catch {}
+        const urls = (${rendererResourceUrls.toString()})();
+        const resolveMicroBus = ${resolveMicroBus.toString()};
+        bus = await resolveMicroBus({
+          cachedBus: null,
+          urls,
+          importNamespace: (url) => import(url)
+        });
+        if (isMicroBus(bus)) {
+          globalThis[cacheKey] = bus;
+        } else {
+          bus = null;
         }
       }
       if (!bus) throw new Error("Codex Micro event bus was not found");
@@ -628,6 +600,14 @@ export class CodexCdpClient {
   }
 
   evaluate(expression) {
+    return this.sendCommand("Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true
+    });
+  }
+
+  sendCommand(method, params) {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error("Codex bridge is disconnected"));
     }
@@ -637,11 +617,11 @@ export class CodexCdpClient {
         this.pending.delete(id);
         reject(new Error("Codex runtime response timed out"));
       }, 7000);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, method });
       this.socket.send(JSON.stringify({
         id,
-        method: "Runtime.evaluate",
-        params: { expression, awaitPromise: true, returnByValue: true }
+        method,
+        params
       }));
     });
   }
@@ -661,7 +641,9 @@ export class CodexCdpClient {
         ?? "Codex evaluation failed"
       ));
     }
-    pending.resolve(message.result?.result?.value);
+    pending.resolve(pending.method === "Runtime.evaluate"
+      ? message.result?.result?.value
+      : message.result);
   }
 
   disconnect() {
